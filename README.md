@@ -17,8 +17,26 @@ The avionics suite is built around an ESP32 DevKit V1 microcontroller. It integr
 ## Getting Started
 
 1. Review `Documentation/avionics_overview.md` for system architecture.
-2. Implement the hardware-specific driver modules under `Avionics/Core/`.
-3. Add build scripts or toolchain configuration for ESP32 firmware.
+2. Use the provided `platformio.ini` to manage ESP32 and library dependencies automatically.
+3. Implement or extend the hardware driver modules under `Avionics/Core/`.
+
+## Recommended Setup
+
+- Use PlatformIO with the `esp32dev` environment.
+- This project uses the Arduino framework for fastest development.
+- `platformio.ini` includes Arduino-style libraries for:
+  - `TinyGPSPlus` for GNSS parsing
+  - `SparkFun_Ublox_Arduino_Library` for the SAM-M8Q GPS
+  - `MPU9250_asukiaaa` for IMU handling
+
+## RFD900x Telemetry Handshake
+
+For the RFD900x, treat it as a serial modem. Start with a simple handshake sequence:
+
+1. Open UART at the configured baud rate.
+2. Send a short `HELLO` or `PING` packet.
+3. Wait for an acknowledgement packet such as `ACK`.
+4. Begin telemetry exchange once the radio link is established.
 
 ## Notes
 

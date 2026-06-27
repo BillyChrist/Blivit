@@ -23,6 +23,26 @@ extern "C" {
 
 #include <stdbool.h>
 
+typedef struct
+{
+    float x;
+    float y;
+    float z;
+} IMU_Vector3f;
+
+typedef struct
+{
+    IMU_Vector3f accel;    // m/s²
+    IMU_Vector3f gyro;     // deg/s
+    IMU_Vector3f mag;      // µT or arbitrary units
+    float roll;            // degrees
+    float pitch;           // degrees
+    float yaw;             // degrees
+    float temperature;     // degrees Celsius (if available)
+} IMU_Data_t;
+
+extern IMU_Data_t imuData;
+
 bool IMU_Init(void);
 void IMU_Update(void);
 

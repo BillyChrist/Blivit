@@ -21,12 +21,32 @@
 
 #include "imu.h"
 
+IMU_Data_t imuData = {
+    .accel = {0.0f, 0.0f, 0.0f},
+    .gyro = {0.0f, 0.0f, 0.0f},
+    .mag = {0.0f, 0.0f, 0.0f},
+    .roll = 0.0f,
+    .pitch = 0.0f,
+    .yaw = 0.0f,
+    .temperature = 0.0f,
+};
+
 bool IMU_Init(void)
 {
+    // TODO: initialize IMU communication and configuration
     return true;
 }
 
 void IMU_Update(void)
 {
-    /* TODO: sample IMU and update attitude data */
+    /*
+     * TODO: read IMU sensor values and populate imuData.
+     * Example:
+     *   imuData.accel.x = ...;
+     *   imuData.gyro.y = ...;
+     *   imuData.mag.z = ...;
+     *   imuData.roll = ...;
+     *   imuData.pitch = ...;
+     *   imuData.yaw = ...;
+     */
 }

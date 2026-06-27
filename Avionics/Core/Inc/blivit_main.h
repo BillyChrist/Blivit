@@ -23,6 +23,14 @@ extern "C" {
 
 #include <stdbool.h>
 
+extern const int RFD900_TX_PIN;
+extern const int RFD900_RX_PIN;
+extern const int HWT905_TX_PIN;
+extern const int HWT905_RX_PIN;
+extern const int GPS_SDA_PIN;
+extern const int GPS_SCL_PIN;
+extern const int HEARTBEAT_LED_PIN;
+
 void Blivit_Init(void);
 void Blivit_Run(void);
 
