@@ -17,8 +17,9 @@ The avionics suite is built around an ESP32 DevKit V1 microcontroller. It integr
 ## Getting Started
 
 1. Review `Documentation/avionics_overview.md` for system architecture.
-2. Use the provided `platformio.ini` to manage ESP32 and library dependencies automatically.
+2. Use the provided `Avionics/platformio.ini` to manage ESP32 and library dependencies automatically.
 3. Implement or extend the hardware driver modules under `Avionics/Core/`.
+4. The ground station is a separate PC-side component and will use a different structure from the ESP32 flight firmware.
 
 ## Recommended Setup
 
