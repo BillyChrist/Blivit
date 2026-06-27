@@ -57,4 +57,4 @@ This means:
 ## Notes
 
 This document now assumes Arduino/PlatformIO is the primary development path.
-If you later want a more embedded C workflow, ESP-IDF can still be considered, but only after the prototype stage.
+If you later we want a more embedded C workflow, ESP-IDF can still be considered, but only after the prototype stage.
