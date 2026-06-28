@@ -8,14 +8,21 @@
 
 bool TelemetrySample_BuildFromSensors(TelemetrySample_t *out)
 {
-    if (!out || !IMU_IsTelemetryReady())
+    if (!out)
     {
         return false;
     }
 
     const GPS_Data_t *gps = GPS_GetData();
+    const bool gps_ready = GPS_IsReady();
+
     IMU_Data_t imu{};
-    IMU_GetTelemetrySnapshot(&imu);
+    const bool imu_ready = IMU_GetTelemetrySnapshot(&imu);
+
+    if (!gps_ready && !imu_ready)
+    {
+        return false;
+    }
 
     std::memset(out, 0, sizeof(*out));
 
@@ -41,19 +48,23 @@ bool TelemetrySample_BuildFromSensors(TelemetrySample_t *out)
     std::strncpy(out->utc_time, gps->utc_time, sizeof(out->utc_time) - 1U);
     std::strncpy(out->date, gps->date, sizeof(out->date) - 1U);
 
-    out->roll = imu.roll;
-    out->pitch = imu.pitch;
-    out->yaw = imu.yaw;
-    out->temperature = imu.temperature;
-    out->accel_x = imu.accel.x;
-    out->accel_y = imu.accel.y;
-    out->accel_z = imu.accel.z;
-    out->gyro_x = imu.gyro.x;
-    out->gyro_y = imu.gyro.y;
-    out->gyro_z = imu.gyro.z;
-    out->mag_x = imu.mag.x;
-    out->mag_y = imu.mag.y;
-    out->mag_z = imu.mag.z;
+    if (imu_ready)
+    {
+        out->roll = imu.roll;
+        out->pitch = imu.pitch;
+        out->yaw = imu.yaw;
+        out->temperature = imu.temperature;
+        out->accel_x = imu.accel.x;
+        out->accel_y = imu.accel.y;
+        out->accel_z = imu.accel.z;
+        out->gyro_x = imu.gyro.x;
+        out->gyro_y = imu.gyro.y;
+        out->gyro_z = imu.gyro.z;
+        out->mag_x = imu.mag.x;
+        out->mag_y = imu.mag.y;
+        out->mag_z = imu.mag.z;
+    }
+
     out->imu_frames = IMU_GetFrameCount();
     out->imu_bytes = IMU_GetByteCount();
 

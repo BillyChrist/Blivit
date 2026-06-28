@@ -3,6 +3,7 @@
 /* USER CODE END Header */
 
 #include "heartbeat.h"
+#include "gps.h"
 #include "main.h"
 #include "serial_debug.h"
 
@@ -158,12 +159,13 @@ void debug_output(void)
     const TelemetrySample_t &s = heartbeatSample;
 
     SerialDebug_Print(
-        "[DEBUG] t=%lums seq=%u gps valid=%d sats=%d hdop=%.1f lat=%.6f lon=%.6f alt=%.1f "
+        "[DEBUG] t=%lums seq=%u gps_ready=%d gps valid=%d sats=%d hdop=%.1f lat=%.6f lon=%.6f alt=%.1f "
         "spd=%.2f crs=%.1f vn=%.2f ve=%.2f vd=%.2f climb=%.2f utc=%s date=%s "
         "imu frames=%lu bytes=%lu r=%.2f p=%.2f y=%.2f temp=%.2f "
         "accel_g=(%.3f,%.3f,%.3f) gyro=(%.2f,%.2f,%.2f) mag=(%.1f,%.1f,%.1f)",
         heartbeatPacket.uptime_ms,
         heartbeatPacket.sequence,
+        GPS_IsReady() ? 1 : 0,
         s.gps_valid,
         s.gps_satellites,
         s.hdop,

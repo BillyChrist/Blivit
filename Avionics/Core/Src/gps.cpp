@@ -59,7 +59,7 @@ static uint32_t last_gps_retry_ms = 0;
 static uint32_t last_gps_rx_ms = 0;
 
 #define GPS_RETRY_INTERVAL_MS 5000U
-#define GPS_I2C_STALE_MS 5000U
+#define GPS_I2C_STALE_MS 15000U
 
 static bool GPS_ConfigureModule(void);
 static bool GPS_TryConnect(void);
@@ -109,7 +109,7 @@ void GPS_Update(void)
             return;
         }
 
-        SerialDebug_Print("[GPS] SAM-M8Q connected on I2C retry (SDA=%d SCL=%d)", GPS_SDA_PIN, GPS_SCL_PIN);
+        SerialDebug_Print("[GPS] SAM-M8Q connected on I2C retry (SDA=%d SCL=%d @ 100kHz)", GPS_SDA_PIN, GPS_SCL_PIN);
     }
 
     const uint32_t now = millis();
@@ -119,7 +119,8 @@ void GPS_Update(void)
     }
     else if ((now - last_gps_rx_ms) >= GPS_I2C_STALE_MS)
     {
-        GPS_MarkDisconnected("I2C stale — no NAV data, reconnecting");
+        /* No UBX for 15 s — likely I2C loss or auto-PVT not running; force reconnect. */
+        GPS_MarkDisconnected("no UBX NAV data for 15 s — reconnecting");
         return;
     }
 
@@ -131,6 +132,32 @@ void GPS_Update(void)
 
     GPS_ApplyReading(&reading);
     GPS_FormatStatusStrings(&reading);
+
+    // Periodic GPS diagnostic if debug_message enabled
+    if (debug_message)
+    {
+        static uint32_t last_gps_debug_ms = 0;
+        const uint32_t debug_now = millis();
+        if ((debug_now - last_gps_debug_ms) >= 1000U)
+        {
+            last_gps_debug_ms = debug_now;
+            SerialDebug_Print(
+                "[GPSDBG] ready=%d fix_valid=%d fix_type=%u sats=%d hdop=%.1f lat=%.6f lon=%.6f utc=%02u:%02u:%02u date=%04u-%02u-%02u",
+                GPS_IsReady() ? 1 : 0,
+                reading.fix_valid ? 1 : 0,
+                reading.fix_type,
+                reading.satellites,
+                reading.hdop,
+                reading.latitude,
+                reading.longitude,
+                reading.hour,
+                reading.minute,
+                reading.second,
+                reading.year,
+                reading.month,
+                reading.day);
+        }
+    }
 }
 
 bool GPS_IsReady(void)
@@ -145,13 +172,39 @@ const GPS_Data_t *GPS_GetData(void)
 
 static bool GPS_ConfigureModule(void)
 {
-    gnss.setPortInput(COM_PORT_I2C, COM_TYPE_UBX);
-    gnss.setI2COutput(COM_TYPE_UBX);
-    gnss.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
-    gnss.setAutoPVT(true, true, 500);
-    gnss.setAutoDOP(true, true, 500);
-    gnss.setMeasurementRate(250);
-    return true;
+    bool ok = true;
+
+    if (!gnss.setPortInput(COM_PORT_I2C, COM_TYPE_UBX))
+    {
+        SerialDebug_Print("[GPS] config failed: setPortInput I2C UBX");
+        ok = false;
+    }
+
+    if (!gnss.setI2COutput(COM_TYPE_UBX))
+    {
+        SerialDebug_Print("[GPS] config failed: setI2COutput UBX");
+        ok = false;
+    }
+
+    if (!gnss.setAutoPVT(true, true, 500))
+    {
+        SerialDebug_Print("[GPS] config failed: setAutoPVT");
+        ok = false;
+    }
+
+    if (!gnss.setAutoDOP(true, true, 500))
+    {
+        SerialDebug_Print("[GPS] config failed: setAutoDOP");
+        ok = false;
+    }
+
+    if (!gnss.setMeasurementRate(250))
+    {
+        SerialDebug_Print("[GPS] config failed: setMeasurementRate 250 ms");
+        ok = false;
+    }
+
+    return ok;
 }
 
 static bool GPS_TryConnect(void)
@@ -166,6 +219,7 @@ static bool GPS_TryConnect(void)
 
     if (!GPS_ConfigureModule())
     {
+        SerialDebug_Print("[GPS] module responded on I2C but configuration failed");
         return false;
     }
 
@@ -235,7 +289,7 @@ static void GPS_ApplyReading(const GPS_Reading_t *reading)
     gpsData.fix.hdop = reading->hdop;
     gpsData.fix.valid = reading->fix_valid;
 
-    if (reading->year >= 2000)
+    if (reading->fix_valid)
     {
         snprintf(
             gpsData.utc_time,

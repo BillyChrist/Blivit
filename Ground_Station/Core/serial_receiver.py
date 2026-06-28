@@ -14,7 +14,7 @@ GRAVITY_MS2 = 9.80665
 # Single-line atomic sample (GPS + IMU) — preferred; fits 115200 @ 33 Hz
 DEBUG_COMBINED_LINE = re.compile(
     r"^\[DEBUG\] t=(?P<uptime>\d+)ms seq=(?P<seq>\d+) "
-    r"gps valid=(?P<valid>\d+) sats=(?P<sats>\d+) hdop=(?P<hdop>[\d.]+) "
+    r"(?:gps_ready=(?P<gps_ready>\d+) )?gps valid=(?P<valid>\d+) sats=(?P<sats>\d+) hdop=(?P<hdop>[\d.]+) "
     r"lat=(?P<lat>[-\d.]+) lon=(?P<lon>[-\d.]+) alt=(?P<alt>[-\d.]+) "
     r"spd=(?P<spd>[-\d.]+) crs=(?P<crs>[-\d.]+) "
     r"(?:vn=(?P<vn>[-\d.]+) ve=(?P<ve>[-\d.]+) vd=(?P<vd>[-\d.]+) climb=(?P<climb>[-\d.]+) )?"

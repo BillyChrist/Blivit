@@ -15,6 +15,7 @@
 
 // ===== Runtime mode =====
 bool debug_mode = true;
+bool debug_message = true;
 bool debug_binary_telemetry = false;
 bool rfd900_hw_flow_control = true;
 

@@ -16,6 +16,7 @@ extern const int GPS_SCL_PIN;
 extern const int HEARTBEAT_LED_PIN;
 
 extern bool debug_mode;
+extern bool debug_message;
 extern bool debug_binary_telemetry;
 extern bool rfd900_hw_flow_control;
 

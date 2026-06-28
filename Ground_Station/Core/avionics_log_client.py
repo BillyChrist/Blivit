@@ -112,7 +112,10 @@ def format_firmware_console_line(line: str) -> Optional[str]:
     if text.startswith("[TASK]") or text.startswith("[ERR]") or text.startswith("[WARN]"):
         return text
 
-    if text.startswith("[RFD900]") or text.startswith("[GPS]") or text.startswith("[IMU]"):
+    if text.startswith("[GPS]"):
+        return text
+
+    if text.startswith("[IMU]"):
         return None
 
     if text.startswith("[") and not text.startswith("[DEBUG]") and not text.startswith("[HB]"):
