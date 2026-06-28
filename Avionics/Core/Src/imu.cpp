@@ -34,6 +34,13 @@
 #define HWT905_ANGLE_RANGE_DEG 180.0f
 #define HWT905_INT16_SCALE 32768.0f
 
+#define IMU_VALID_ACCEL 0x01U
+#define IMU_VALID_GYRO  0x02U
+#define IMU_VALID_ANGLE 0x04U
+#define IMU_VALID_MAG   0x08U
+#define IMU_VALID_TEMP  0x10U
+#define IMU_TELEMETRY_READY_MASK (IMU_VALID_ACCEL | IMU_VALID_ANGLE | IMU_VALID_TEMP)
+
 static HardwareSerial &imu_serial = Serial2;
 static bool imu_ready = false;
 static uint32_t imu_frame_count = 0;
@@ -41,6 +48,10 @@ static uint32_t imu_byte_count = 0;
 static bool imu_no_data_warned = false;
 static uint8_t rx_frame[HWT905_FRAME_SIZE];
 static uint8_t rx_index = 0;
+
+// Hold-last-good merge — telemetry only reads this snapshot, never partial live imuData.
+static IMU_Data_t imuTelemetryHold{};
+static uint8_t imuTelemetryValid = 0U;
 
 static int16_t IMU_DecodeInt16(uint8_t low, uint8_t high);
 static bool IMU_ValidateFrame(const uint8_t *frame);
@@ -55,6 +66,8 @@ IMU_Data_t imuData{};
 bool IMU_Init(void)
 {
     imuData = {};
+    imuTelemetryHold = {};
+    imuTelemetryValid = 0U;
 
     imu_serial.begin(HWT905_BAUD, SERIAL_8N1, HWT905_RX_PIN, HWT905_TX_PIN);
     rx_index = 0;
@@ -102,6 +115,22 @@ uint32_t IMU_GetByteCount(void)
 uint32_t IMU_GetFrameCount(void)
 {
     return imu_frame_count;
+}
+
+bool IMU_IsTelemetryReady(void)
+{
+    return (imuTelemetryValid & IMU_TELEMETRY_READY_MASK) == IMU_TELEMETRY_READY_MASK;
+}
+
+bool IMU_GetTelemetrySnapshot(IMU_Data_t *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+
+    *out = imuTelemetryHold;
+    return IMU_IsTelemetryReady();
 }
 
 static int16_t IMU_DecodeInt16(uint8_t low, uint8_t high)
@@ -157,6 +186,10 @@ static void IMU_ParseFrame(const uint8_t *frame)
         imuData.accel.y = IMU_ScaleAccel(ay);
         imuData.accel.z = IMU_ScaleAccel(az);
         imuData.temperature = static_cast<float>(temp_raw) / 100.0f;
+
+        imuTelemetryHold.accel = imuData.accel;
+        imuTelemetryHold.temperature = imuData.temperature;
+        imuTelemetryValid |= IMU_VALID_ACCEL | IMU_VALID_TEMP;
         break;
     }
 
@@ -169,6 +202,9 @@ static void IMU_ParseFrame(const uint8_t *frame)
         imuData.gyro.x = IMU_ScaleGyro(gx);
         imuData.gyro.y = IMU_ScaleGyro(gy);
         imuData.gyro.z = IMU_ScaleGyro(gz);
+
+        imuTelemetryHold.gyro = imuData.gyro;
+        imuTelemetryValid |= IMU_VALID_GYRO;
         break;
     }
 
@@ -181,6 +217,11 @@ static void IMU_ParseFrame(const uint8_t *frame)
         imuData.roll = IMU_ScaleAngle(roll);
         imuData.pitch = IMU_ScaleAngle(pitch);
         imuData.yaw = IMU_ScaleAngle(yaw);
+
+        imuTelemetryHold.roll = imuData.roll;
+        imuTelemetryHold.pitch = imuData.pitch;
+        imuTelemetryHold.yaw = imuData.yaw;
+        imuTelemetryValid |= IMU_VALID_ANGLE;
         break;
     }
 
@@ -189,11 +230,13 @@ static void IMU_ParseFrame(const uint8_t *frame)
         const int16_t hx = IMU_DecodeInt16(frame[2], frame[3]);
         const int16_t hy = IMU_DecodeInt16(frame[4], frame[5]);
         const int16_t hz = IMU_DecodeInt16(frame[6], frame[7]);
-        // Bytes 8-9 in the mag frame are not temperature — only update mag here.
 
         imuData.mag.x = static_cast<float>(hx);
         imuData.mag.y = static_cast<float>(hy);
         imuData.mag.z = static_cast<float>(hz);
+
+        imuTelemetryHold.mag = imuData.mag;
+        imuTelemetryValid |= IMU_VALID_MAG;
         break;
     }
 

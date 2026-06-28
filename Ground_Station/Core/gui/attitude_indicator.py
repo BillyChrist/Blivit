@@ -14,7 +14,7 @@ from PyQt6.QtGui import (
     QPen,
     QPolygonF,
 )
-from PyQt6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from gui.comms_panel import CommsStatusPanel
 
@@ -194,11 +194,18 @@ class AttitudeIndicator(QWidget):
 
         font_label = QFont("Consolas", 9)
         font_label.setBold(True)
+        font_cardinal = QFont("Segoe UI", 10)
+        font_cardinal.setBold(True)
         painter.setFont(font_label)
         fm = QFontMetrics(font_label)
+        fm_card = QFontMetrics(font_cardinal)
+
+        _CARDINALS = {0: "N", 90: "E", 180: "S", 270: "W"}
 
         painter.save()
-        painter.setClipRect(QRectF(strip_left + 1, tape_y + 1, strip_w * 2 - 2, tape_h - 2))
+        painter.setClipRect(
+            QRectF(strip_left + 1, strip_y, strip_w * 2 - 2, tape_y + tape_h - strip_y - 1)
+        )
 
         center_tick = int(yaw // 5) * 5
         for h in range(center_tick - 45, center_tick + 50, 5):
@@ -213,17 +220,34 @@ class AttitudeIndicator(QWidget):
             if x < strip_left + 6 or x > strip_right - 6:
                 continue
 
+            is_cardinal = heading % 90 == 0
             is_major = heading % 10 == 0
-            tick_top = tape_y + 3
-            tick_bot = tape_y + tape_h - (10 if is_major else 5)
-            painter.setPen(QPen(QColor("#aaaaaa" if is_major else "#666666"), 1))
+
+            tick_top = tape_y + 2
+            if is_cardinal:
+                tick_bot = tape_y + tape_h - 2
+                painter.setPen(QPen(QColor("#ffcc00" if heading == 0 else "#cccccc"), 2))
+            elif is_major:
+                tick_bot = tape_y + tape_h - 8
+                painter.setPen(QPen(QColor("#aaaaaa"), 1))
+            else:
+                tick_bot = tape_y + tape_h - 5
+                painter.setPen(QPen(QColor("#666666"), 1))
             painter.drawLine(int(x), tick_top, int(x), tick_bot)
 
-            if is_major and strip_left + 20 < x < strip_right - 20:
+            if is_cardinal and strip_left + 22 < x < strip_right - 22:
+                label = _CARDINALS[heading]
+                painter.setFont(font_cardinal)
+                text_w = fm_card.horizontalAdvance(label)
+                text_rect = QRectF(x - text_w / 2 - 2, strip_y - 1, text_w + 4, label_h + 2)
+                painter.setPen(QColor("#ff5555" if heading == 0 else "#f0f0f0"))
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, label)
+                painter.setFont(font_label)
+            elif is_major and not is_cardinal and strip_left + 20 < x < strip_right - 20:
                 text = f"{heading:03d}"
                 text_w = fm.horizontalAdvance(text)
                 text_rect = QRectF(x - text_w / 2, strip_y, text_w, label_h)
-                painter.setPen(QColor("#e8e8e8"))
+                painter.setPen(QColor("#888888"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
 
         painter.restore()
@@ -285,28 +309,55 @@ class AttitudeIndicator(QWidget):
 
 
 class AttitudeDisplay(QWidget):
-    """Comms status, horizon, and attitude readout."""
+    """Comms status beside horizon and attitude readout."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumWidth(300)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
 
         self.comms = CommsStatusPanel()
+        self.comms.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        horizon_col = QVBoxLayout()
+        horizon_col.setSpacing(8)
         self._indicator = AttitudeIndicator()
         self._readout = AttitudeReadout()
+        horizon_col.addWidget(self._indicator, alignment=Qt.AlignmentFlag.AlignCenter)
+        horizon_col.addWidget(self._readout, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(self.comms, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._indicator, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._readout, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.comms, stretch=2)
+        root.addLayout(horizon_col, stretch=3)
 
     @property
     def logging_toggled(self):
         return self.comms.logging_toggled
 
+    @property
+    def avionics_log_start(self):
+        return self.comms.avionics_log_start
+
+    @property
+    def avionics_log_stop(self):
+        return self.comms.avionics_log_stop
+
+    @property
+    def avionics_log_download(self):
+        return self.comms.avionics_log_download
+
+    @property
+    def avionics_log_clear(self):
+        return self.comms.avionics_log_clear
+
     def set_logging_state(self, active: bool, filepath: str = "") -> None:
         self.comms.set_logging_state(active, filepath)
+
+    def set_avionics_log_state(self, state: str, detail: str = "") -> None:
+        self.comms.set_avionics_log_state(state, detail)
 
     def set_attitude(self, roll: float, pitch: float, yaw: float) -> None:
         self._indicator.set_attitude(roll, pitch, yaw)

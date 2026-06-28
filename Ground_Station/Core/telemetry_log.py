@@ -21,6 +21,14 @@ def make_log_filepath(directory: str | Path | None = None) -> Path:
     return base / f"telemetry_{stamp}.csv"
 
 
+def make_avionics_log_filepath(directory: str | Path | None = None) -> Path:
+    """Timestamped path for CSV downloaded from avionics onboard storage."""
+    base = Path(directory or RECEIVED_DATA_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return base / f"AvionicsTelem_{stamp}.csv"
+
+
 class CsvTelemetryLogger:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)

@@ -11,6 +11,7 @@
 #define RFD900_H
 
 bool RFD900_Init(void);
+void RFD900_PollIncoming(void);
 void RFD900_Process(void);
 bool RFD900_SendFrame(const char *payload);
 bool RFD900_ReceiveFrame(char *frame, int length);

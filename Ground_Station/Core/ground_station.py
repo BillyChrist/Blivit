@@ -22,12 +22,21 @@ from config import (
     SERIAL_OPEN_RETRY_DELAY_S,
     SERIAL_OPEN_INITIAL_DELAY_S,
     TELEMETRY_INTERVAL_MS,
+    SERIAL_RECONNECT_COOLDOWN_S,
+    SERIAL_STALE_RECONNECT_MS,
     resolve_debug_mode,
+)
+from heartbeat import HEARTBEAT_PACKET_SIZE
+from link_stats import LinkStats, LinkStatsTracker
+from avionics_log_client import (
+    AvionicsLogDownloadSession,
+    format_avionics_log_console_line,
+    format_firmware_console_line,
 )
 from rfd900_receiver import handle_incoming_line
 from serial_receiver import SerialDebugParser
 from telemetry import TelemetrySnapshot, TelemetryStore, run_consumer
-from telemetry_log import CsvTelemetryLogger, make_log_filepath
+from telemetry_log import CsvTelemetryLogger, make_avionics_log_filepath, make_log_filepath
 
 
 class GroundStation:
@@ -48,6 +57,19 @@ class GroundStation:
         self._csv_stop: threading.Event | None = None
         self._csv_thread: threading.Thread | None = None
         self._csv_path: Path | None = None
+        self._link_stats = LinkStatsTracker()
+        self._avionics_download: AvionicsLogDownloadSession | None = None
+        self._avionics_download_lock = threading.Lock()
+        self._avionics_log_event: Optional[Callable[[str], None]] = None
+        self._serial_fault: Optional[str] = None
+
+    def set_avionics_log_event_handler(self, handler: Callable[[str], None]) -> None:
+        """Called for avionics LOG ack/err/end events (GUI may update state)."""
+        self._avionics_log_event = handler
+
+    @property
+    def link_stats(self) -> LinkStats:
+        return self._link_stats.stats
 
     @property
     def debug_mode(self) -> bool:
@@ -68,8 +90,35 @@ class GroundStation:
     def is_csv_logging(self) -> bool:
         return self._csv_logger is not None
 
+    def is_avionics_downloading(self) -> bool:
+        with self._avionics_download_lock:
+            return self._avionics_download is not None
+
+    @property
+    def serial_fault(self) -> Optional[str]:
+        return self._serial_fault
+
+    @property
+    def reader_alive(self) -> bool:
+        return self._reader_thread is not None and self._reader_thread.is_alive()
+
+    @property
+    def serial_is_open(self) -> bool:
+        return self._serial is not None and self._serial.is_open
+
     def set_boot_logger(self, handler: Callable[[str], None]) -> None:
         self._boot_logger = handler
+
+    def format_link_status(self) -> str:
+        mode = "debug" if self._debug_mode else "field"
+        return self._link_stats.format_status_line(
+            port=self._port or "—",
+            baud=self._baud or 0,
+            mode=mode,
+        )
+
+    def update_link_state(self, state: str) -> None:
+        self._link_stats.set_link_state(state)
 
     def init(self, *, quiet: bool = False) -> None:
         self._quiet = quiet
@@ -94,10 +143,7 @@ class GroundStation:
             self._serial = self._open_serial_with_retry(self._port, self._baud)
         except serial.SerialException as exc:
             self._serial = None
-            raise OSError(
-                f"Cannot open {self._port}: {exc}. "
-                "Close PlatformIO serial monitor or other apps using this port."
-            ) from exc
+            raise OSError(f"Cannot open {self._port}: {exc}") from exc
 
         self._stop.clear()
         self._reader_thread = threading.Thread(
@@ -111,6 +157,44 @@ class GroundStation:
             print("Listening for telemetry. Ctrl+C to stop.\n")
         elif self._boot_logger:
             self._boot_logger(f"Opened {self._port} @ {self._baud} ({mode})")
+        self._link_stats.note_handshake("port_open")
+        self._serial_fault = None
+
+    def reconnect_serial(self) -> None:
+        """Close and reopen the serial port and restart the reader thread."""
+        if not self._port:
+            if self._debug_mode:
+                self._port = DEBUG_SERIAL_PORT
+                self._baud = DEBUG_BAUD
+            else:
+                self._port = RFD900_SERIAL_PORT
+                self._baud = RFD900_BAUD
+
+        self._stop.set()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=1.5)
+            self._reader_thread = None
+
+        if self._serial is not None:
+            try:
+                if self._serial.is_open:
+                    self._serial.close()
+            except serial.SerialException:
+                pass
+            self._serial = None
+
+        self._stop.clear()
+        self._serial_fault = None
+        self._serial = self._open_serial_with_retry(self._port, self._baud)
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            name="blivit-serial-reader",
+            daemon=True,
+        )
+        self._reader_thread.start()
+        self._link_stats.note_handshake("port_reopen")
+        if self._boot_logger is not None:
+            self._boot_logger(f"Reopened {self._port} @ {self._baud}")
 
     def _open_serial_with_retry(self, port: str, baud: int) -> serial.Serial:
         time.sleep(SERIAL_OPEN_INITIAL_DELAY_S)
@@ -203,6 +287,89 @@ class GroundStation:
         self._csv_path = None
         return path
 
+    def send_command(self, command: str) -> None:
+        if self._serial is None or not self._serial.is_open:
+            raise RuntimeError("Serial port is not open")
+        line = command if command.endswith("\n") else f"{command}\n"
+        self._serial.write(line.encode("ascii"))
+        self._serial.flush()
+
+    def avionics_log_start(self) -> None:
+        self.send_command("Blivit,LOG,START")
+
+    def avionics_log_stop(self) -> None:
+        self.send_command("Blivit,LOG,STOP")
+
+    def avionics_log_clear(self) -> None:
+        """Delete onboard flight-data CSV from avionics flash (does not touch ground-station files)."""
+        self.send_command("Blivit,LOG,CLEAR")
+
+    def query_avionics_storage(self) -> None:
+        """Ask ESP32 for onboard log status and flash capacity (Blivit,LOG,STAT)."""
+        self.send_command("Blivit,LOG,STAT")
+
+    def download_avionics_log(
+        self,
+        path: str | Path | None = None,
+        *,
+        timeout_s: float = 120.0,
+    ) -> Path:
+        if self._serial is None or not self._serial.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        last_logged_at = 0.0
+        progress_interval_s = 3.0
+
+        def on_started() -> None:
+            if self._boot_logger is not None:
+                self._boot_logger("ESP32 download started — receiving data chunks…")
+
+        def on_progress(nbytes: int, total_bytes: int | None) -> None:
+            nonlocal last_logged_at
+            if self._boot_logger is None:
+                return
+            now = time.monotonic()
+            if last_logged_at > 0.0 and (now - last_logged_at) < progress_interval_s:
+                return
+            last_logged_at = now
+
+            kb = nbytes / 1024.0
+            if total_bytes and total_bytes > 0:
+                pct = min(100, int(nbytes * 100 / total_bytes))
+                total_kb = total_bytes / 1024.0
+                self._boot_logger(
+                    f"Downloading… {pct}% ({kb:.0f} / {total_kb:.0f} KB)"
+                )
+            else:
+                self._boot_logger(f"Downloading… {kb:.0f} KB received")
+
+        session = AvionicsLogDownloadSession(on_progress=on_progress, on_started=on_started)
+        with self._avionics_download_lock:
+            if self._avionics_download is not None:
+                raise RuntimeError("Avionics log download already in progress")
+            self._avionics_download = session
+
+        try:
+            self.send_command("Blivit,LOG,DL")
+            data = session.wait(timeout_s)
+            dest = Path(path) if path else make_avionics_log_filepath()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            if self._boot_logger is not None:
+                self._boot_logger(
+                    f"Download complete — saved {len(data) / 1024.0:.1f} KB to {dest}"
+                )
+            return dest
+        except Exception:
+            try:
+                self.send_command("Blivit,LOG,ABORT")
+            except Exception:
+                pass
+            raise
+        finally:
+            with self._avionics_download_lock:
+                self._avionics_download = None
+
     def run(self, *, print_telemetry: bool = True) -> None:
         if self._serial is None:
             raise RuntimeError("GroundStation.init() must be called first")
@@ -232,6 +399,7 @@ class GroundStation:
                 self._poll()
             except serial.SerialException as exc:
                 message = f"[GS] serial read error: {exc}"
+                self._serial_fault = str(exc)
                 if self._boot_logger is not None:
                     self._boot_logger(message)
                 elif not self._quiet:
@@ -240,7 +408,11 @@ class GroundStation:
 
     def _poll(self) -> None:
         assert self._serial is not None
-        raw = self._serial.readline()
+        try:
+            raw = self._serial.readline()
+        except serial.SerialException as exc:
+            self._serial_fault = str(exc)
+            raise
         if not raw:
             return
 
@@ -254,12 +426,69 @@ class GroundStation:
         else:
             self._handle_radio_line(line)
 
+    def _feed_avionics_log_line(self, line: str) -> bool:
+        """Return True if the line is avionics-log protocol (not live telemetry)."""
+        if not line.startswith("Blivit,LOG,"):
+            return False
+
+        with self._avionics_download_lock:
+            session = self._avionics_download
+        if session is not None:
+            session.feed_line(line)
+
+        console_text = format_avionics_log_console_line(line)
+        if console_text and self._boot_logger is not None:
+            self._boot_logger(console_text)
+
+        if self._avionics_log_event is not None and not line.startswith("Blivit,LOG,DATA,"):
+            self._avionics_log_event(line)
+
+        return True
+
     def _handle_debug_line(self, line: str) -> None:
+        stripped = line.strip()
+        if self._feed_avionics_log_line(stripped):
+            return
+
+        if stripped.startswith("Blivit,HELLO,"):
+            self._link_stats.note_handshake("remote_hello")
+
+        if stripped.startswith("TELEMETRY,"):
+            result = handle_incoming_line(line)
+            if result is None:
+                return
+            reply, packet = result
+            if reply and self._serial is not None:
+                self._serial.write(reply.encode("ascii"))
+                self._link_stats.note_ack_sent()
+            if packet is not None:
+                self._link_stats.note_packet(
+                    sequence=packet.sequence,
+                    wire_format="binary",
+                    payload_bytes=HEARTBEAT_PACKET_SIZE,
+                )
+                self.telemetry.publish(TelemetrySnapshot.from_heartbeat(packet))
+            return
+
         telemetry = self._debug_parser.feed_line(line)
         if telemetry is not None:
+            self._link_stats.note_packet(
+                sequence=telemetry.sequence,
+                wire_format="text",
+                payload_bytes=0,
+            )
             self.telemetry.publish(TelemetrySnapshot.from_debug(telemetry))
 
     def _handle_radio_line(self, line: str) -> None:
+        stripped = line.strip()
+        if self._feed_avionics_log_line(stripped):
+            return
+
+        if stripped.startswith("Blivit,HELLO,"):
+            self._link_stats.note_handshake("remote_hello")
+        elif stripped == "PING":
+            self._link_stats.note_handshake("ping")
+
         result = handle_incoming_line(line)
         if result is None:
             return
@@ -267,12 +496,22 @@ class GroundStation:
         reply, packet = result
         if reply and self._serial is not None:
             self._serial.write(reply.encode("ascii"))
+            self._link_stats.note_ack_sent()
+            if reply.strip().startswith("Blivit,READY"):
+                self._link_stats.note_handshake("ready_sent")
 
         if packet is not None:
+            self._link_stats.note_packet(
+                sequence=packet.sequence,
+                wire_format="binary",
+                payload_bytes=HEARTBEAT_PACKET_SIZE,
+            )
             self.telemetry.publish(TelemetrySnapshot.from_heartbeat(packet))
 
     def _on_boot_line(self, line: str) -> None:
-        message = f"[GS] {line}"
+        message = format_firmware_console_line(line)
+        if message is None:
+            return
         if self._boot_logger is not None:
             self._boot_logger(message)
         elif not self._quiet:

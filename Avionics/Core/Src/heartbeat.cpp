@@ -1,76 +1,73 @@
 /* USER CODE BEGIN Header */
-/** ================================================================
- * Blivit Avionics Project
- *
- * Component: System heartbeat / health monitor
- *
- * Aggregates sensor data into HeartbeatPacket_t and routes telemetry:
- *   debug_mode true  -> human-readable USB serial output
- *   debug_mode false -> RFD900 radio (handled by rfd900.cpp / main loop)
- * ================================================================
- */
+/** Heartbeat / telemetry output — runs on Core 0 from queued TelemetrySample_t only. */
 /* USER CODE END Header */
 
 #include "heartbeat.h"
-#include "gps.h"
-#include "imu.h"
 #include "main.h"
 #include "serial_debug.h"
 
 #include <cstring>
+#include <cstdio>
 
-#define DEBUG_OUTPUT_INTERVAL_MS TELEMETRY_OUTPUT_INTERVAL_MS
+#define DEBUG_OUTPUT_INTERVAL_MS DEBUG_TELEMETRY_INTERVAL_MS
 #define HEARTBEAT_OUTPUT_INTERVAL_MS 5000U
 #define HEARTBEAT_GRAVITY_MS2 9.80665f
+#define DEBUG_BINARY_HEX_MAX ((HEARTBEAT_PACKET_SIZE * 2U) + 1U)
 
 static float Heartbeat_AccelToG(float accel);
 
 HeartbeatPacket_t heartbeatPacket{};
 
-// Frozen IMU sample used for telemetry output (debug + RFD900)
-static IMU_Data_t telemetryImu{};
+static TelemetrySample_t heartbeatSample{};
+static bool heartbeatSampleValid = false;
 
 static uint16_t Heartbeat_CalculateCRC(const uint8_t *data, size_t length);
 static bool Heartbeat_ShouldPrint(uint32_t intervalMs, uint32_t *lastPrintMs);
-static void Heartbeat_ApplyImuToPacket(const IMU_Data_t &imu);
+static void Heartbeat_BytesToHex(const uint8_t *data, size_t length, char *out, size_t out_length);
+static void Heartbeat_DebugBinaryOutput(void);
 
 bool Heartbeat_Init(void)
 {
     heartbeatPacket = {};
     heartbeatPacket.system_state = 1;
+    heartbeatSample = {};
+    heartbeatSampleValid = false;
     return true;
 }
 
-void Heartbeat_Update(void)
+bool Heartbeat_HasSample(void)
 {
-    heartbeatPacket.uptime_ms = SerialDebug_Millis();
+    return heartbeatSampleValid;
+}
+
+void Heartbeat_UpdateFromSample(const TelemetrySample_t *sample)
+{
+    if (!sample)
+    {
+        return;
+    }
+
+    heartbeatSample = *sample;
+    heartbeatSampleValid = true;
+
+    heartbeatPacket.uptime_ms = sample->uptime_ms;
     heartbeatPacket.system_state = debug_mode ? 1U : 2U;
-    heartbeatPacket.gps_fix = gpsData.fix.valid ? 1U : 0U;
-    heartbeatPacket.gps_satellites = static_cast<uint8_t>(gpsData.fix.satellites);
-    heartbeatPacket.latitude = static_cast<float>(gpsData.position.latitude);
-    heartbeatPacket.longitude = static_cast<float>(gpsData.position.longitude);
-    heartbeatPacket.altitude = gpsData.position.altitude;
-    heartbeatPacket.speed = gpsData.position.speed;
-    heartbeatPacket.course = gpsData.position.course;
-}
-
-void Heartbeat_CaptureSnapshot(void)
-{
-    telemetryImu = imuData;
-    Heartbeat_ApplyImuToPacket(telemetryImu);
-}
-
-static void Heartbeat_ApplyImuToPacket(const IMU_Data_t &imu)
-{
-    heartbeatPacket.accel_x = imu.accel.x;
-    heartbeatPacket.accel_y = imu.accel.y;
-    heartbeatPacket.accel_z = imu.accel.z;
-    heartbeatPacket.gyro_x = imu.gyro.x;
-    heartbeatPacket.gyro_y = imu.gyro.y;
-    heartbeatPacket.gyro_z = imu.gyro.z;
-    heartbeatPacket.mag_x = imu.mag.x;
-    heartbeatPacket.mag_y = imu.mag.y;
-    heartbeatPacket.mag_z = imu.mag.z;
+    heartbeatPacket.gps_fix = sample->gps_valid;
+    heartbeatPacket.gps_satellites = sample->gps_satellites;
+    heartbeatPacket.latitude = static_cast<float>(sample->latitude);
+    heartbeatPacket.longitude = static_cast<float>(sample->longitude);
+    heartbeatPacket.altitude = sample->altitude;
+    heartbeatPacket.speed = sample->speed;
+    heartbeatPacket.course = sample->course;
+    heartbeatPacket.accel_x = sample->accel_x;
+    heartbeatPacket.accel_y = sample->accel_y;
+    heartbeatPacket.accel_z = sample->accel_z;
+    heartbeatPacket.gyro_x = sample->gyro_x;
+    heartbeatPacket.gyro_y = sample->gyro_y;
+    heartbeatPacket.gyro_z = sample->gyro_z;
+    heartbeatPacket.mag_x = sample->mag_x;
+    heartbeatPacket.mag_y = sample->mag_y;
+    heartbeatPacket.mag_z = sample->mag_z;
 }
 
 void telemetry_output(void)
@@ -85,12 +82,10 @@ void heartbeat_output(void)
     uint8_t buffer[HEARTBEAT_PACKET_SIZE];
     size_t packetLen = 0;
 
-    if (!Heartbeat_ShouldPrint(HEARTBEAT_OUTPUT_INTERVAL_MS, &lastPrintMs))
+    if (!heartbeatSampleValid || !Heartbeat_ShouldPrint(HEARTBEAT_OUTPUT_INTERVAL_MS, &lastPrintMs))
     {
         return;
     }
-
-    Heartbeat_CaptureSnapshot();
 
     if (!Heartbeat_BuildPacket(buffer, sizeof(buffer), &packetLen))
     {
@@ -120,18 +115,18 @@ void heartbeat_output(void)
         heartbeatPacket.altitude,
         heartbeatPacket.speed,
         heartbeatPacket.course,
-        gpsData.position.vel_n,
-        gpsData.position.vel_e,
-        gpsData.position.vel_d,
-        -gpsData.position.vel_d);
+        heartbeatSample.vel_n,
+        heartbeatSample.vel_e,
+        heartbeatSample.vel_d,
+        -heartbeatSample.vel_d);
 
     SerialDebug_Print(
         "[HB] imu r=%.2f p=%.2f y=%.2f temp=%.2f "
         "accel_g=(%.3f,%.3f,%.3f) gyro=(%.2f,%.2f,%.2f) mag=(%.1f,%.1f,%.1f)",
-        telemetryImu.roll,
-        telemetryImu.pitch,
-        telemetryImu.yaw,
-        telemetryImu.temperature,
+        heartbeatSample.roll,
+        heartbeatSample.pitch,
+        heartbeatSample.yaw,
+        heartbeatSample.temperature,
         Heartbeat_AccelToG(heartbeatPacket.accel_x),
         Heartbeat_AccelToG(heartbeatPacket.accel_y),
         Heartbeat_AccelToG(heartbeatPacket.accel_z),
@@ -147,58 +142,62 @@ void debug_output(void)
 {
     static uint32_t lastPrintMs = 0;
 
-    if (!Heartbeat_ShouldPrint(DEBUG_OUTPUT_INTERVAL_MS, &lastPrintMs))
+    if (!heartbeatSampleValid || !Heartbeat_ShouldPrint(DEBUG_OUTPUT_INTERVAL_MS, &lastPrintMs))
     {
         return;
     }
 
-    Heartbeat_CaptureSnapshot();
+    if (debug_mode && debug_binary_telemetry)
+    {
+        Heartbeat_DebugBinaryOutput();
+        return;
+    }
 
     heartbeatPacket.sequence++;
 
-    SerialDebug_Print(
-        "[DEBUG] t=%lums seq=%u gps valid=%d sats=%d hdop=%.1f lat=%.6f lon=%.6f alt=%.1f "
-        "spd=%.2f crs=%.1f vn=%.2f ve=%.2f vd=%.2f climb=%.2f utc=%s date=%s",
-        heartbeatPacket.uptime_ms,
-        heartbeatPacket.sequence,
-        gpsData.fix.valid,
-        gpsData.fix.satellites,
-        gpsData.fix.hdop,
-        gpsData.position.latitude,
-        gpsData.position.longitude,
-        gpsData.position.altitude,
-        gpsData.position.speed,
-        gpsData.position.course,
-        gpsData.position.vel_n,
-        gpsData.position.vel_e,
-        gpsData.position.vel_d,
-        -gpsData.position.vel_d,
-        gpsData.utc_time[0] ? gpsData.utc_time : "--",
-        gpsData.date[0] ? gpsData.date : "--");
+    const TelemetrySample_t &s = heartbeatSample;
 
     SerialDebug_Print(
-        "[DEBUG] imu frames=%lu bytes=%lu r=%.2f p=%.2f y=%.2f temp=%.2f "
+        "[DEBUG] t=%lums seq=%u gps valid=%d sats=%d hdop=%.1f lat=%.6f lon=%.6f alt=%.1f "
+        "spd=%.2f crs=%.1f vn=%.2f ve=%.2f vd=%.2f climb=%.2f utc=%s date=%s "
+        "imu frames=%lu bytes=%lu r=%.2f p=%.2f y=%.2f temp=%.2f "
         "accel_g=(%.3f,%.3f,%.3f) gyro=(%.2f,%.2f,%.2f) mag=(%.1f,%.1f,%.1f)",
-        static_cast<unsigned long>(IMU_GetFrameCount()),
-        static_cast<unsigned long>(IMU_GetByteCount()),
-        telemetryImu.roll,
-        telemetryImu.pitch,
-        telemetryImu.yaw,
-        telemetryImu.temperature,
-        Heartbeat_AccelToG(telemetryImu.accel.x),
-        Heartbeat_AccelToG(telemetryImu.accel.y),
-        Heartbeat_AccelToG(telemetryImu.accel.z),
-        telemetryImu.gyro.x,
-        telemetryImu.gyro.y,
-        telemetryImu.gyro.z,
-        telemetryImu.mag.x,
-        telemetryImu.mag.y,
-        telemetryImu.mag.z);
+        heartbeatPacket.uptime_ms,
+        heartbeatPacket.sequence,
+        s.gps_valid,
+        s.gps_satellites,
+        s.hdop,
+        s.latitude,
+        s.longitude,
+        s.altitude,
+        s.speed,
+        s.course,
+        s.vel_n,
+        s.vel_e,
+        s.vel_d,
+        -s.vel_d,
+        s.utc_time[0] ? s.utc_time : "--",
+        s.date[0] ? s.date : "--",
+        static_cast<unsigned long>(s.imu_frames),
+        static_cast<unsigned long>(s.imu_bytes),
+        s.roll,
+        s.pitch,
+        s.yaw,
+        s.temperature,
+        Heartbeat_AccelToG(s.accel_x),
+        Heartbeat_AccelToG(s.accel_y),
+        Heartbeat_AccelToG(s.accel_z),
+        s.gyro_x,
+        s.gyro_y,
+        s.gyro_z,
+        s.mag_x,
+        s.mag_y,
+        s.mag_z);
 }
 
 bool Heartbeat_BuildPacket(uint8_t *buffer, size_t bufferLen, size_t *packetLen)
 {
-    if (!buffer || !packetLen || bufferLen < HEARTBEAT_PACKET_SIZE)
+    if (!buffer || !packetLen || bufferLen < HEARTBEAT_PACKET_SIZE || !heartbeatSampleValid)
     {
         return false;
     }
@@ -255,4 +254,48 @@ static bool Heartbeat_ShouldPrint(uint32_t intervalMs, uint32_t *lastPrintMs)
 
     *lastPrintMs = now;
     return true;
+}
+
+static void Heartbeat_BytesToHex(const uint8_t *data, size_t length, char *out, size_t out_length)
+{
+    if (!data || !out || out_length == 0)
+    {
+        return;
+    }
+
+    size_t write_index = 0;
+    for (size_t i = 0; i < length; ++i)
+    {
+        if ((write_index + 3U) > out_length)
+        {
+            break;
+        }
+
+        std::snprintf(out + write_index, out_length - write_index, "%02X", data[i]);
+        write_index += 2U;
+    }
+
+    out[write_index] = '\0';
+}
+
+static void Heartbeat_DebugBinaryOutput(void)
+{
+    heartbeatPacket.sequence++;
+
+    uint8_t packet[HEARTBEAT_PACKET_SIZE];
+    size_t packet_length = 0;
+
+    if (!Heartbeat_BuildPacket(packet, sizeof(packet), &packet_length))
+    {
+        return;
+    }
+
+    char hex_payload[DEBUG_BINARY_HEX_MAX];
+    Heartbeat_BytesToHex(packet, packet_length, hex_payload, sizeof(hex_payload));
+
+    SerialDebug_Print(
+        "TELEMETRY,%u,%s,%04X",
+        heartbeatPacket.sequence,
+        hex_payload,
+        heartbeatPacket.crc);
 }

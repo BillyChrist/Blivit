@@ -36,5 +36,7 @@ bool IMU_Init(void);
 void IMU_Update(void);
 uint32_t IMU_GetFrameCount(void);
 uint32_t IMU_GetByteCount(void);
+bool IMU_GetTelemetrySnapshot(IMU_Data_t *out);
+bool IMU_IsTelemetryReady(void);
 
 #endif // IMU_H

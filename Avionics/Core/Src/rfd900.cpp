@@ -12,11 +12,13 @@
 /* USER CODE END Header */
 
 #include "rfd900.h"
+#include "avionics_command.h"
 #include "heartbeat.h"
 #include "main.h"
 #include "serial_debug.h"
 
 #include <Arduino.h>
+#include <driver/uart.h>
 
 #include <cstdio>
 #include <cstring>
@@ -25,6 +27,7 @@
 #define RFD900_BUFFER_SIZE 256
 #define RFD900_HELLO_INTERVAL_MS 2000U
 #define RFD900_HELLO_FRAME "Blivit,HELLO,1"
+#define RFD900_TX_TIMEOUT_MS 500U
 
 enum class RFD900_LinkState
 {
@@ -45,7 +48,6 @@ static uint32_t rfd900_last_telemetry_ms = 0;
 
 static bool RFD900_Write(const char *data);
 static bool RFD900_ReadLine(char *line, size_t length);
-static void RFD900_PollIncoming(void);
 static void RFD900_HandleLine(const char *line);
 static bool RFD900_LineIsAck(const char *line);
 static void RFD900_SendHello(void);
@@ -62,16 +64,24 @@ bool RFD900_Init(void)
     rfd900_link_state = RFD900_LinkState::Handshaking;
 
     radio_serial.setPins(RFD900_RX_PIN, RFD900_TX_PIN, RFD900_CTS_PIN, RFD900_RTS_PIN);
-    radio_serial.begin(RFD900_BAUD, SERIAL_8N1);
+    radio_serial.begin(RFD900_BAUD, SERIAL_8N1, RFD900_RX_PIN, RFD900_TX_PIN);
     radio_serial.setTimeout(10);
+
+    if (rfd900_hw_flow_control)
+    {
+        radio_serial.setHwFlowCtrlMode(UART_HW_FLOWCTRL_CTS_RTS, 122);
+    }
 
     rfd900_ready = true;
 
     SerialDebug_Print(
-        "[RFD900] ready on UART1 (TX=%d RX=%d @ %d baud, HW flow optional)",
+        "[RFD900] UART1 TX=%d RX=%d CTS=%d RTS=%d @ %d baud flow=%s",
         RFD900_TX_PIN,
         RFD900_RX_PIN,
-        RFD900_BAUD);
+        RFD900_CTS_PIN,
+        RFD900_RTS_PIN,
+        RFD900_BAUD,
+        rfd900_hw_flow_control ? "CTS/RTS" : "none");
 
     RFD900_SendHello();
     rfd900_last_hello_ms = millis();
@@ -144,7 +154,28 @@ static bool RFD900_Write(const char *data)
     }
 
     const size_t length = std::strlen(data);
-    return radio_serial.write(reinterpret_cast<const uint8_t *>(data), length) == length;
+    const size_t written = radio_serial.write(reinterpret_cast<const uint8_t *>(data), length);
+
+    if (rfd900_hw_flow_control && written < length)
+    {
+        const uint32_t deadline = millis() + RFD900_TX_TIMEOUT_MS;
+        size_t total = written;
+        while (total < length && static_cast<int32_t>(deadline - millis()) > 0)
+        {
+            const size_t chunk = radio_serial.write(
+                reinterpret_cast<const uint8_t *>(data + total),
+                length - total);
+            if (chunk == 0)
+            {
+                delay(1);
+                continue;
+            }
+            total += chunk;
+        }
+        return total == length;
+    }
+
+    return written == length;
 }
 
 static bool RFD900_ReadLine(char *line, size_t length)
@@ -188,7 +219,7 @@ static bool RFD900_ReadLine(char *line, size_t length)
     return false;
 }
 
-static void RFD900_PollIncoming(void)
+void RFD900_PollIncoming(void)
 {
     char incoming[RFD900_BUFFER_SIZE];
 
@@ -253,6 +284,11 @@ static void RFD900_HandleLine(const char *line)
         return;
     }
 
+    if (AvionicsCommand_HandleLine(line))
+    {
+        return;
+    }
+
     if (std::strncmp(line, "TELEMETRY,", 10) == 0)
     {
         unsigned int remote_seq = 0;
@@ -294,7 +330,10 @@ static void RFD900_BytesToHex(const uint8_t *data, size_t length, char *out, siz
 
 static bool RFD900_SendHeartbeatTelemetry(void)
 {
-    Heartbeat_CaptureSnapshot();
+    if (!Heartbeat_HasSample())
+    {
+        return false;
+    }
 
     uint8_t packet[HEARTBEAT_PACKET_SIZE];
     size_t packet_length = 0;

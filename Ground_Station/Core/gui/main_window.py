@@ -3,50 +3,126 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import traceback
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPlainTextEdit,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from gui.attitude_indicator import AttitudeDisplay
+from gui.flight_analytics import FlightAnalyticsTab
 from gui.log_bridge import UiLogBridge
-from config import GUI_REFRESH_MS, TELEMETRY_STALE_MS
+from config import (
+    GUI_REFRESH_MS,
+    SERIAL_RECONNECT_COOLDOWN_S,
+    SERIAL_RECONNECT_POLL_MS,
+    SERIAL_STALE_RECONNECT_MS,
+    STATUS_LOG_INTERVAL_MS,
+    TELEMETRY_STALE_MS,
+)
 from ground_station import GroundStation
 from telemetry import TelemetrySnapshot
 
 
+class _ConsoleHeader(QFrame):
+    """Top bar of the console — drag vertically to resize the log panel."""
+
+    def __init__(self, splitter: QSplitter, parent=None) -> None:
+        super().__init__(parent)
+        self._splitter = splitter
+        self._drag_y: float | None = None
+        self._sizes: list[int] = []
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_y = event.globalPosition().y()
+            self._sizes = self._splitter.sizes()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_y is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = int(event.globalPosition().y() - self._drag_y)
+            upper = self._sizes[0] + delta
+            lower = self._sizes[1] - delta
+            min_upper = self._splitter.widget(0).minimumHeight()
+            min_lower = self._splitter.widget(1).minimumHeight()
+            if upper >= min_upper and lower >= min_lower:
+                self._splitter.setSizes([upper, lower])
+                self._drag_y = event.globalPosition().y()
+                self._sizes = self._splitter.sizes()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_y = None
+        super().mouseReleaseEvent(event)
+
+
 class DataPanel(QGroupBox):
+    _ROW_HEIGHT = 26
+
     def __init__(self, title: str, rows: list[tuple[str, str]], parent=None) -> None:
         super().__init__(title, parent)
         self._labels: dict[str, QLabel] = {}
-        layout = QGridLayout(self)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        inner = QWidget()
+        layout = QGridLayout(inner)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setVerticalSpacing(6)
+        layout.setHorizontalSpacing(12)
         layout.setColumnStretch(1, 1)
+
+        font_label = QFont("Segoe UI", 9)
         font_value = QFont("Consolas", 11)
 
         for row, (key, label_text) in enumerate(rows):
             name = QLabel(label_text)
+            name.setFont(font_label)
             name.setStyleSheet("color: #999999;")
+            name.setMinimumHeight(self._ROW_HEIGHT)
             value = QLabel("—")
             value.setFont(font_value)
+            value.setMinimumHeight(self._ROW_HEIGHT)
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             value.setStyleSheet("color: #e8e8e8;")
             layout.addWidget(name, row, 0)
             layout.addWidget(value, row, 1)
             self._labels[key] = value
+
+        inner.setMinimumHeight(len(rows) * self._ROW_HEIGHT + max(0, len(rows) - 1) * 6 + 8)
+        scroll.setWidget(inner)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 12, 8, 8)
+        outer.addWidget(scroll)
 
     def set_value(self, key: str, text: str, *, color: Optional[str] = None) -> None:
         label = self._labels[key]
@@ -73,6 +149,8 @@ class GroundStationWindow(QMainWindow):
         self._first_telemetry_logged = False
         self._startup_attempts = 0
         self._max_startup_attempts = 3
+        self._stale_since: float | None = None
+        self._last_reconnect_attempt = 0.0
 
         self.setWindowTitle("Blivit Ground Station")
         self.resize(1100, 720)
@@ -93,6 +171,39 @@ class GroundStationWindow(QMainWindow):
                 font-family: Consolas;
                 font-size: 10pt;
             }
+            QSplitter::handle:vertical {
+                background-color: #2a2a2a;
+                height: 8px;
+                margin: 0 4px;
+                border-top: 1px solid #444444;
+                border-bottom: 1px solid #444444;
+            }
+            QSplitter::handle:vertical:hover {
+                background-color: #3d3d3d;
+            }
+            QFrame#logHeader {
+                background-color: #1a1a1a;
+                border: 1px solid #333333;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #333333;
+                background-color: #121212;
+            }
+            QTabBar::tab {
+                background-color: #1a1a1a;
+                color: #888888;
+                padding: 8px 18px;
+                border: 1px solid #333333;
+                border-bottom: none;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #121212;
+                color: #e0e0e0;
+            }
             """
         )
 
@@ -100,9 +211,18 @@ class GroundStationWindow(QMainWindow):
 
         self._log_bridge = UiLogBridge()
         self._log_bridge.message.connect(self._append_log, Qt.ConnectionType.QueuedConnection)
+        self._log_bridge.avionics_event.connect(
+            self._on_avionics_log_event_ui,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._station.set_boot_logger(self._log_bridge.write)
+        self._station.set_avionics_log_event_handler(self._log_bridge.emit_avionics_event)
 
         self._attitude.logging_toggled.connect(self._toggle_csv_logging)
+        self._attitude.avionics_log_start.connect(self._avionics_log_start)
+        self._attitude.avionics_log_stop.connect(self._avionics_log_stop)
+        self._attitude.avionics_log_download.connect(self._avionics_log_download)
+        self._attitude.avionics_log_clear.connect(self._avionics_log_clear)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -110,6 +230,12 @@ class GroundStationWindow(QMainWindow):
         self._startup_timer = QTimer(self)
         self._startup_timer.setSingleShot(True)
         self._startup_timer.timeout.connect(self._begin_startup)
+
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._log_periodic_status)
+
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.timeout.connect(self._periodic_serial_recovery)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -141,27 +267,36 @@ class GroundStationWindow(QMainWindow):
                 self._append_log(f"Retrying in {delay_ms // 1000}s…")
                 QTimer.singleShot(delay_ms, self._begin_startup)
                 return
-            self._append_log("Close PlatformIO serial monitor, then restart the GUI.")
+            self._append_log("Could not open serial port — will keep retrying in the background.")
         else:
             self._serial_error = None
             self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
             if self._log_path:
                 try:
                     path = self._station.start_csv_logging(self._log_path)
-                    self._append_log(f"Logging started: {path}")
+                    self._append_log(f"Ground station CSV logging started: {path.name}")
                     self._sync_logging_ui()
                 except OSError as exc:
                     self._append_log(f"Logging failed: {exc}")
             self._append_log("Port open — waiting for first telemetry…")
+            QTimer.singleShot(500, self._query_avionics_storage)
 
         self._startup_complete = True
         self._timer.start(GUI_REFRESH_MS)
+        self._status_timer.start(STATUS_LOG_INTERVAL_MS)
+        self._reconnect_timer.start(SERIAL_RECONNECT_POLL_MS)
         self._refresh()
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+        root.setContentsMargins(6, 6, 6, 6)
+
+        self._tabs = QTabWidget()
+        self._live_tab = QWidget()
+        live_layout = QVBoxLayout(self._live_tab)
+        live_layout.setContentsMargins(0, 0, 0, 0)
 
         header = QHBoxLayout()
         self._status_mode = QLabel("Mode: —")
@@ -172,21 +307,30 @@ class GroundStationWindow(QMainWindow):
             label.setFont(QFont("Consolas", 10))
             header.addWidget(label)
         header.addStretch()
-        root.addLayout(header)
+        live_layout.addLayout(header)
+
+        main_split = QSplitter(Qt.Orientation.Vertical)
+        main_split.setChildrenCollapsible(False)
+        main_split.setHandleWidth(8)
+
+        top_section = QWidget()
+        top_layout = QVBoxLayout(top_section)
+        top_layout.setContentsMargins(0, 0, 0, 0)
 
         top_split = QSplitter(Qt.Orientation.Horizontal)
 
         left = QWidget()
+        left.setMinimumWidth(340)
         left_layout = QVBoxLayout(left)
-        left_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         self._attitude = AttitudeDisplay()
-        left_layout.addStretch()
-        left_layout.addWidget(self._attitude, alignment=Qt.AlignmentFlag.AlignCenter)
-        left_layout.addStretch()
+        self._attitude.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        left_layout.addWidget(self._attitude, stretch=1)
         top_split.addWidget(left)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
 
         self._gps_panel = DataPanel(
             "GPS / Navigation",
@@ -207,7 +351,7 @@ class GroundStationWindow(QMainWindow):
                 ("date", "Date"),
             ],
         )
-        right_layout.addWidget(self._gps_panel)
+        right_layout.addWidget(self._gps_panel, stretch=3)
 
         imu_row = QHBoxLayout()
         self._imu_att_panel = DataPanel(
@@ -237,17 +381,57 @@ class GroundStationWindow(QMainWindow):
         )
         imu_row.addWidget(self._imu_att_panel)
         imu_row.addWidget(self._imu_sensor_panel)
-        right_layout.addLayout(imu_row)
+        right_layout.addLayout(imu_row, stretch=2)
 
         top_split.addWidget(right)
-        top_split.setStretchFactor(0, 2)
-        top_split.setStretchFactor(1, 3)
-        root.addWidget(top_split, stretch=3)
+        top_split.setStretchFactor(0, 4)
+        top_split.setStretchFactor(1, 5)
+        top_layout.addWidget(top_split)
+        top_section.setMinimumHeight(280)
+        main_split.addWidget(top_section)
+
+        log_section = QWidget()
+        log_layout = QVBoxLayout(log_section)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(0)
+
+        log_header = _ConsoleHeader(main_split)
+        log_header.setObjectName("logHeader")
+        log_header.setFixedHeight(22)
+        log_header.setCursor(Qt.CursorShape.SizeVerCursor)
+        log_header_layout = QHBoxLayout(log_header)
+        log_header_layout.setContentsMargins(10, 0, 10, 0)
+        log_title = QLabel("Console")
+        log_title.setFont(QFont("Segoe UI", 9))
+        log_title.setStyleSheet("color: #777777; border: none;")
+        log_hint = QLabel("drag to resize")
+        log_hint.setFont(QFont("Segoe UI", 8))
+        log_hint.setStyleSheet("color: #555555; border: none;")
+        log_hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        log_header_layout.addWidget(log_title)
+        log_header_layout.addStretch()
+        log_header_layout.addWidget(log_hint)
 
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(500)
-        root.addWidget(self._log, stretch=1)
+        self._log.setMinimumHeight(72)
+
+        log_layout.addWidget(log_header)
+        log_layout.addWidget(self._log)
+        log_section.setMinimumHeight(96)
+        main_split.addWidget(log_section)
+
+        main_split.setStretchFactor(0, 3)
+        main_split.setStretchFactor(1, 1)
+        main_split.setSizes([520, 160])
+
+        live_layout.addWidget(main_split, stretch=1)
+
+        self._analytics = FlightAnalyticsTab()
+        self._tabs.addTab(self._live_tab, "Live")
+        self._tabs.addTab(self._analytics, "Flight Analytics")
+        root.addWidget(self._tabs, stretch=1)
 
     def _append_log(self, message: str) -> None:
         self._log.appendPlainText(message)
@@ -256,7 +440,8 @@ class GroundStationWindow(QMainWindow):
         if self._station.is_csv_logging():
             path = self._station.stop_csv_logging()
             if path is not None:
-                self._append_log(f"Logging stopped: {path}")
+                self._append_log(f"Ground station CSV logging stopped: {path.name}")
+                self._analytics.notify_log_saved(path)
             self._attitude.set_logging_state(False)
             return
 
@@ -267,8 +452,9 @@ class GroundStationWindow(QMainWindow):
             self._attitude.set_logging_state(False)
             return
 
-        self._append_log(f"Logging started: {path}")
+        self._append_log(f"Ground station CSV logging started: {path.name}")
         self._attitude.set_logging_state(True, str(path))
+        self._analytics.refresh_file_list()
 
     def _sync_logging_ui(self) -> None:
         if self._station.is_csv_logging():
@@ -276,6 +462,87 @@ class GroundStationWindow(QMainWindow):
             self._attitude.set_logging_state(True, str(path) if path else "")
         else:
             self._attitude.set_logging_state(False)
+
+    def _query_avionics_storage(self) -> None:
+        if self._serial_error or not self._startup_complete:
+            return
+        try:
+            self._station.query_avionics_storage()
+        except Exception as exc:
+            self._append_log(f"Onboard storage query failed: {exc}")
+
+    def _on_avionics_log_event_ui(self, line: str) -> None:
+        if "Start recording trigger received" in line:
+            self._attitude.set_avionics_log_state("recording")
+        elif "Stop recording trigger received" in line:
+            self._attitude.set_avionics_log_state("idle", "Ready to download")
+        elif line.startswith("Blivit,LOG,ERR,"):
+            self._attitude.set_avionics_log_state("idle")
+        elif "Download accepted" in line:
+            self._attitude.set_avionics_log_state("downloading", "Receiving…")
+        elif "Onboard flight data cleared" in line:
+            self._attitude.set_avionics_log_state("idle", "Flash log cleared")
+
+    def _avionics_log_clear(self) -> None:
+        if not self._startup_complete:
+            self._append_log("Avionics log: serial not ready")
+            return
+        try:
+            self._station.avionics_log_clear()
+            self._append_log("Sending clear flight data command…")
+        except Exception as exc:
+            self._append_log(f"Clear flight data failed: {exc}")
+
+    def _avionics_log_start(self) -> None:
+        if not self._startup_complete:
+            self._append_log("Avionics log: serial not ready")
+            return
+        try:
+            self._attitude.set_avionics_log_state("recording", "Starting…")
+            self._station.avionics_log_start()
+            self._append_log("Sending remote record command…")
+        except Exception as exc:
+            self._append_log(f"Avionics log start failed: {exc}")
+            self._attitude.set_avionics_log_state("idle")
+
+    def _avionics_log_stop(self) -> None:
+        if not self._startup_complete:
+            return
+        try:
+            self._attitude.set_avionics_log_state("recording", "Stopping…")
+            self._station.avionics_log_stop()
+            self._append_log("Sending stop recording command…")
+        except Exception as exc:
+            self._append_log(f"Avionics log stop failed: {exc}")
+
+    def _avionics_log_download(self) -> None:
+        if not self._startup_complete:
+            self._append_log("Avionics log: serial not ready")
+            return
+
+        self._attitude.set_avionics_log_state("downloading")
+        self._append_log("Requesting ESP32 log download…")
+
+        def work() -> None:
+            try:
+                path = self._station.download_avionics_log()
+            except Exception as exc:
+                message = str(exc)
+                QTimer.singleShot(0, lambda m=message: self._on_avionics_download_failed(m))
+                return
+            QTimer.singleShot(0, lambda p=path: self._on_avionics_download_done(p))
+
+        threading.Thread(target=work, name="avionics-log-download", daemon=True).start()
+
+    def _on_avionics_download_done(self, path) -> None:
+        self._attitude.set_avionics_log_state("idle", path.name)
+        self._append_log(f"Saved ESP32 log: {path}")
+        self._analytics.refresh_file_list()
+        self._analytics.notify_log_saved(path)
+
+    def _on_avionics_download_failed(self, message: str) -> None:
+        self._attitude.set_avionics_log_state("idle")
+        self._append_log(f"ESP32 log download failed: {message}")
 
     def _refresh(self) -> None:
         if not self._startup_complete:
@@ -305,12 +572,20 @@ class GroundStationWindow(QMainWindow):
         self._update_gps(snap)
         self._update_imu(snap)
 
+    def _link_state_from_telemetry(self, state) -> str:
+        if state.latest is None:
+            return "waiting"
+        age_ms = (time.monotonic() - state.latest.received_at) * 1000.0
+        if age_ms > TELEMETRY_STALE_MS:
+            return "stale"
+        return "live"
+
     def _update_comms(self, state) -> None:
         mode = "Debug (USB serial)" if self._station.debug_mode else "Field (RFD900)"
         port = self._station.port or "—"
         baud = self._station.baud or 0
 
-        if self._serial_error:
+        if self._serial_error and not self._station.reader_alive:
             link_state = "error"
             error = self._serial_error
             sequence = None
@@ -331,10 +606,7 @@ class GroundStationWindow(QMainWindow):
             sequence = snap.sequence
             uptime_ms = snap.uptime_ms
             source = snap.source
-            if age_ms > TELEMETRY_STALE_MS:
-                link_state = "stale"
-            else:
-                link_state = "live"
+            link_state = "stale" if age_ms > TELEMETRY_STALE_MS else "live"
 
         self._attitude.update_comms(
             port=port,
@@ -347,6 +619,7 @@ class GroundStationWindow(QMainWindow):
             source=source,
             error=error,
         )
+        self._station.update_link_state(link_state)
 
         if self._serial_error:
             self._status_link.setText("Link: error")
@@ -360,6 +633,86 @@ class GroundStationWindow(QMainWindow):
         else:
             self._status_link.setText("Link: live")
             self._status_link.setStyleSheet("color: #44dd66;")
+
+        self._maybe_recover_serial(link_state)
+
+    def _periodic_serial_recovery(self) -> None:
+        """Background poll — keeps trying to reopen serial after USB drop or stale link."""
+        if not self._startup_complete or self._station.is_avionics_downloading():
+            return
+
+        state = self._station.telemetry.copy_state()
+        link_state = self._link_state_from_telemetry(state)
+
+        if (
+            link_state == "live"
+            and self._station.reader_alive
+            and not self._station.serial_fault
+            and self._station.serial_is_open
+        ):
+            self._stale_since = None
+            return
+
+        reason = "no fresh telemetry"
+        if self._station.serial_fault:
+            reason = f"serial read error: {self._station.serial_fault}"
+        elif not self._station.reader_alive:
+            reason = "serial reader stopped"
+        elif not self._station.serial_is_open:
+            reason = "serial port closed"
+
+        if link_state == "stale":
+            if self._stale_since is None:
+                self._stale_since = time.monotonic()
+            elif (time.monotonic() - self._stale_since) * 1000.0 < SERIAL_STALE_RECONNECT_MS:
+                return
+        elif link_state == "waiting" and state.latest is not None:
+            # Had telemetry before, now waiting — treat like stale
+            if self._stale_since is None:
+                self._stale_since = time.monotonic()
+            elif (time.monotonic() - self._stale_since) * 1000.0 < SERIAL_STALE_RECONNECT_MS:
+                return
+        elif link_state == "waiting" and state.latest is None:
+            # Never connected — still retry open periodically
+            pass
+
+        self._attempt_serial_reconnect(reason)
+
+    def _maybe_recover_serial(self, link_state: str) -> None:
+        if not self._startup_complete:
+            return
+        if self._station.is_avionics_downloading():
+            self._stale_since = None
+            return
+
+        if link_state == "live":
+            self._stale_since = None
+
+    def _attempt_serial_reconnect(self, reason: str) -> None:
+        now = time.monotonic()
+        if (now - self._last_reconnect_attempt) < SERIAL_RECONNECT_COOLDOWN_S:
+            return
+
+        self._last_reconnect_attempt = now
+        self._append_log(f"Reopening serial port ({reason})…")
+        try:
+            self._station.reconnect_serial()
+            self._serial_error = None
+            self._stale_since = None
+            self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
+            self._append_log("Serial port reopened — waiting for telemetry…")
+        except Exception as exc:
+            self._append_log(f"Serial reconnect failed: {exc}")
+            self._stale_since = time.monotonic()
+
+    def _log_periodic_status(self) -> None:
+        if not self._startup_complete:
+            return
+        if not self._station.reader_alive and not self._station.serial_is_open:
+            return
+
+        line = self._station.format_link_status()
+        self._append_log(line)
 
     def _update_status(self, snap: TelemetrySnapshot) -> None:
         self._status_link.setText("Link: live")
@@ -405,7 +758,7 @@ class GroundStationWindow(QMainWindow):
         if self._station.is_csv_logging():
             path = self._station.stop_csv_logging()
             if path is not None:
-                self._append_log(f"Logging stopped: {path}")
+                self._append_log(f"Ground station CSV logging stopped: {path.name}")
         self._station.close()
         super().closeEvent(event)
 

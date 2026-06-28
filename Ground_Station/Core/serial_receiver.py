@@ -1,5 +1,5 @@
 """
-Parse avionics USB serial debug lines ([DEBUG] / [HB]).
+Parse avionics USB serial debug lines ([DEBUG] / [HB] / TELEMETRY binary on USB).
 Used when debug_mode is True on both avionics and ground station.
 """
 
@@ -11,13 +11,30 @@ from typing import Callable, Optional
 
 GRAVITY_MS2 = 9.80665
 
-DEBUG_LINE = re.compile(
+# Single-line atomic sample (GPS + IMU) — preferred; fits 115200 @ 33 Hz
+DEBUG_COMBINED_LINE = re.compile(
     r"^\[DEBUG\] t=(?P<uptime>\d+)ms seq=(?P<seq>\d+) "
     r"gps valid=(?P<valid>\d+) sats=(?P<sats>\d+) hdop=(?P<hdop>[\d.]+) "
-    r"lat=(?P<lat>[-\d.]+) lon=(?P<lon>[-\d.]+) alt=(?P<alt>[\d.]+) "
-    r"spd=(?P<spd>[\d.]+) crs=(?P<crs>[\d.]+) "
+    r"lat=(?P<lat>[-\d.]+) lon=(?P<lon>[-\d.]+) alt=(?P<alt>[-\d.]+) "
+    r"spd=(?P<spd>[-\d.]+) crs=(?P<crs>[-\d.]+) "
     r"(?:vn=(?P<vn>[-\d.]+) ve=(?P<ve>[-\d.]+) vd=(?P<vd>[-\d.]+) climb=(?P<climb>[-\d.]+) )?"
-    r"utc=(?P<utc>\S+) date=(?P<date>\S+)"
+    r"utc=(?P<utc>\S+) date=(?P<utc_date>\S+) "
+    r"imu (?:frames=(?P<frames>\d+) )?(?:bytes=(?P<bytes>\d+) )?"
+    r"r=(?P<roll>[-\d.]+) p=(?P<pitch>[-\d.]+) y=(?P<yaw>[-\d.]+) "
+    r"temp=(?P<temp>[-\d.]+) "
+    r"(?P<accel_unit>accel_g|accel)=\((?P<ax>[-\d.]+),(?P<ay>[-\d.]+),(?P<az>[-\d.]+)\) "
+    r"gyro=\((?P<gx>[-\d.]+),(?P<gy>[-\d.]+),(?P<gz>[-\d.]+)\) "
+    r"mag=\((?P<mx>[-\d.]+),(?P<my>[-\d.]+),(?P<mz>[-\d.]+)\)"
+)
+
+# Legacy two-line format (GPS line then IMU line)
+DEBUG_GPS_LINE = re.compile(
+    r"^\[DEBUG\] t=(?P<uptime>\d+)ms seq=(?P<seq>\d+) "
+    r"gps valid=(?P<valid>\d+) sats=(?P<sats>\d+) hdop=(?P<hdop>[\d.]+) "
+    r"lat=(?P<lat>[-\d.]+) lon=(?P<lon>[-\d.]+) alt=(?P<alt>[-\d.]+) "
+    r"spd=(?P<spd>[-\d.]+) crs=(?P<crs>[-\d.]+) "
+    r"(?:vn=(?P<vn>[-\d.]+) ve=(?P<ve>[-\d.]+) vd=(?P<vd>[-\d.]+) climb=(?P<climb>[-\d.]+) )?"
+    r"utc=(?P<utc>\S+) date=(?P<date>\S+)$"
 )
 
 DEBUG_IMU_LINE = re.compile(
@@ -86,9 +103,13 @@ class SerialDebugParser:
         if line.startswith("ax_g="):
             return None
 
-        debug_match = DEBUG_LINE.match(line)
-        if debug_match:
-            data = debug_match.groupdict()
+        combined = DEBUG_COMBINED_LINE.match(line)
+        if combined:
+            return self._from_combined(combined.groupdict())
+
+        gps_match = DEBUG_GPS_LINE.match(line)
+        if gps_match:
+            data = gps_match.groupdict()
             self._pending = DebugTelemetry(
                 uptime_ms=int(data["uptime"]),
                 sequence=int(data["seq"]),
@@ -111,34 +132,12 @@ class SerialDebugParser:
 
         imu_match = DEBUG_IMU_LINE.match(line)
         if imu_match and self._pending is not None:
-            data = imu_match.groupdict()
-            self._pending.imu_frames = int(data["frames"] or 0)
-            self._pending.imu_bytes = int(data["bytes"] or 0)
-            self._pending.roll = float(data["roll"])
-            self._pending.pitch = float(data["pitch"])
-            self._pending.yaw = float(data["yaw"])
-            self._pending.temperature = float(data["temp"])
-            ax = float(data["ax"])
-            ay = float(data["ay"])
-            az = float(data["az"])
-            if data["accel_unit"] == "accel_g":
-                ax *= GRAVITY_MS2
-                ay *= GRAVITY_MS2
-                az *= GRAVITY_MS2
-            self._pending.accel_x = ax
-            self._pending.accel_y = ay
-            self._pending.accel_z = az
-            self._pending.gyro_x = float(data["gx"])
-            self._pending.gyro_y = float(data["gy"])
-            self._pending.gyro_z = float(data["gz"])
-            self._pending.mag_x = float(data["mx"])
-            self._pending.mag_y = float(data["my"])
-            self._pending.mag_z = float(data["mz"])
+            self._apply_imu(self._pending, imu_match.groupdict())
             complete = self._pending
             self._pending = None
             return complete
 
-        if HB_LINE.match(line):
+        if HB_LINE.match(line) or line.startswith("TELEMETRY,"):
             return None
 
         if line.startswith("[") and not line.startswith("[DEBUG]") and not line.startswith("[HB]"):
@@ -146,6 +145,53 @@ class SerialDebugParser:
                 self._on_boot_line(line)
 
         return None
+
+    def _from_combined(self, data: dict[str, str]) -> DebugTelemetry:
+        sample = DebugTelemetry(
+            uptime_ms=int(data["uptime"]),
+            sequence=int(data["seq"]),
+            gps_valid=bool(int(data["valid"])),
+            gps_satellites=int(data["sats"]),
+            hdop=float(data["hdop"]),
+            latitude=float(data["lat"]),
+            longitude=float(data["lon"]),
+            altitude=float(data["alt"]),
+            speed=float(data["spd"]),
+            course=float(data["crs"]),
+            vel_n=float(data["vn"] or 0.0),
+            vel_e=float(data["ve"] or 0.0),
+            vel_d=float(data["vd"] or 0.0),
+            climb_rate=float(data["climb"] or 0.0),
+            utc=data["utc"],
+            date=data["utc_date"],
+        )
+        self._apply_imu(sample, data)
+        return sample
+
+    @staticmethod
+    def _apply_imu(target: DebugTelemetry, data: dict[str, str]) -> None:
+        target.imu_frames = int(data["frames"] or 0)
+        target.imu_bytes = int(data["bytes"] or 0)
+        target.roll = float(data["roll"])
+        target.pitch = float(data["pitch"])
+        target.yaw = float(data["yaw"])
+        target.temperature = float(data["temp"])
+        ax = float(data["ax"])
+        ay = float(data["ay"])
+        az = float(data["az"])
+        if data["accel_unit"] == "accel_g":
+            ax *= GRAVITY_MS2
+            ay *= GRAVITY_MS2
+            az *= GRAVITY_MS2
+        target.accel_x = ax
+        target.accel_y = ay
+        target.accel_z = az
+        target.gyro_x = float(data["gx"])
+        target.gyro_y = float(data["gy"])
+        target.gyro_z = float(data["gz"])
+        target.mag_x = float(data["mx"])
+        target.mag_y = float(data["my"])
+        target.mag_z = float(data["mz"])
 
     @staticmethod
     def format_telemetry(data: DebugTelemetry) -> str:

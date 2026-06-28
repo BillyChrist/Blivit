@@ -55,7 +55,15 @@ typedef struct
 } GPS_Reading_t;
 
 static bool gps_connected = false;
+static uint32_t last_gps_retry_ms = 0;
+static uint32_t last_gps_rx_ms = 0;
 
+#define GPS_RETRY_INTERVAL_MS 5000U
+#define GPS_I2C_STALE_MS 5000U
+
+static bool GPS_ConfigureModule(void);
+static bool GPS_TryConnect(void);
+static void GPS_MarkDisconnected(const char *reason);
 static bool GPS_ReadModule(GPS_Reading_t *reading);
 static void GPS_ApplyReading(const GPS_Reading_t *reading);
 static void GPS_FormatStatusStrings(const GPS_Reading_t *reading);
@@ -68,22 +76,17 @@ bool GPS_Init(void)
     strncpy(gpsData.status, "NOFIX", sizeof(gpsData.status));
     strncpy(gpsData.mode, "NONE", sizeof(gpsData.mode));
 
-    Wire.begin(GPS_SDA_PIN, GPS_SCL_PIN);
-    Wire.setClock(100000);
-
-    gps_connected = gnss.begin(Wire, 0x42, 500);
+    last_gps_retry_ms = millis();
+    gps_connected = GPS_TryConnect();
     if (!gps_connected)
     {
-        SerialDebug_Print("[GPS] init failed — check Qwiic wiring (SDA=%d SCL=%d)", GPS_SDA_PIN, GPS_SCL_PIN);
+        SerialDebug_Print(
+            "[GPS] init failed — check Qwiic wiring (SDA=%d SCL=%d); retrying every %u s",
+            GPS_SDA_PIN,
+            GPS_SCL_PIN,
+            GPS_RETRY_INTERVAL_MS / 1000U);
         return false;
     }
-
-    gnss.setPortInput(COM_PORT_I2C, COM_TYPE_UBX);
-    gnss.setI2COutput(COM_TYPE_UBX);
-    gnss.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
-    gnss.setAutoPVT(true, true, 500);
-    gnss.setAutoDOP(true, true, 500);
-    gnss.setMeasurementRate(250);
 
     SerialDebug_Print("[GPS] SAM-M8Q ready on I2C (SDA=%d SCL=%d @ 100kHz)", GPS_SDA_PIN, GPS_SCL_PIN);
     return true;
@@ -93,10 +96,32 @@ void GPS_Update(void)
 {
     if (!gps_connected)
     {
-        return;
+        const uint32_t now = millis();
+        if ((now - last_gps_retry_ms) < GPS_RETRY_INTERVAL_MS)
+        {
+            return;
+        }
+
+        last_gps_retry_ms = now;
+        gps_connected = GPS_TryConnect();
+        if (!gps_connected)
+        {
+            return;
+        }
+
+        SerialDebug_Print("[GPS] SAM-M8Q connected on I2C retry (SDA=%d SCL=%d)", GPS_SDA_PIN, GPS_SCL_PIN);
     }
 
-    gnss.checkUblox();
+    const uint32_t now = millis();
+    if (gnss.checkUblox())
+    {
+        last_gps_rx_ms = now;
+    }
+    else if ((now - last_gps_rx_ms) >= GPS_I2C_STALE_MS)
+    {
+        GPS_MarkDisconnected("I2C stale — no NAV data, reconnecting");
+        return;
+    }
 
     GPS_Reading_t reading;
     if (!GPS_ReadModule(&reading))
@@ -116,6 +141,46 @@ bool GPS_IsReady(void)
 const GPS_Data_t *GPS_GetData(void)
 {
     return &gpsData;
+}
+
+static bool GPS_ConfigureModule(void)
+{
+    gnss.setPortInput(COM_PORT_I2C, COM_TYPE_UBX);
+    gnss.setI2COutput(COM_TYPE_UBX);
+    gnss.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
+    gnss.setAutoPVT(true, true, 500);
+    gnss.setAutoDOP(true, true, 500);
+    gnss.setMeasurementRate(250);
+    return true;
+}
+
+static bool GPS_TryConnect(void)
+{
+    Wire.begin(GPS_SDA_PIN, GPS_SCL_PIN);
+    Wire.setClock(100000);
+
+    if (!gnss.begin(Wire, 0x42, 500))
+    {
+        return false;
+    }
+
+    if (!GPS_ConfigureModule())
+    {
+        return false;
+    }
+
+    last_gps_rx_ms = millis();
+    return true;
+}
+
+static void GPS_MarkDisconnected(const char *reason)
+{
+    gps_connected = false;
+    last_gps_retry_ms = millis();
+    if (reason && reason[0] != '\0')
+    {
+        SerialDebug_Print("[GPS] %s", reason);
+    }
 }
 
 static bool GPS_ReadModule(GPS_Reading_t *reading)

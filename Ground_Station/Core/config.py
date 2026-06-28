@@ -20,15 +20,23 @@ RFD900_SERIAL_PORT = "COM7"
 RFD900_BAUD = 57600
 
 # Telemetry cadence — keep in sync with Avionics/Core/Inc/heartbeat.h
-# TELEMETRY_OUTPUT_INTERVAL_MS (30 ms -> ~33 Hz, max for RFD900 @ 57600)
+# TELEMETRY_OUTPUT_INTERVAL_MS = 30 ms (~33 Hz) on RFD900 @ 57600 (binary ~160 B/frame)
+# USB debug @ 115200: one combined [DEBUG] line @ 33 Hz (~9 KB/s) fits; two lines saturated link.
+# Set debug_binary_telemetry=true in avionics main.cpp to send TELEMETRY hex on USB (RFD sim).
 TELEMETRY_INTERVAL_MS = 30
 TELEMETRY_STALE_MS = 120  # ~4 missed packets before STALE
 GUI_REFRESH_MS = 33
+STATUS_LOG_INTERVAL_MS = 5000
 
 # Serial open — Windows can briefly hold COM ports after monitor disconnect
 SERIAL_OPEN_RETRIES = 6
 SERIAL_OPEN_RETRY_DELAY_S = 0.5
 SERIAL_OPEN_INITIAL_DELAY_S = 0.75
+
+# Reopen serial when link is stale, reader stopped, or port dropped (USB unplug/replug)
+SERIAL_STALE_RECONNECT_MS = 2000
+SERIAL_RECONNECT_COOLDOWN_S = 3.0
+SERIAL_RECONNECT_POLL_MS = 3000
 
 # Telemetry store — ring buffer for plots; bounded queue for async consumers
 TELEMETRY_HISTORY_SIZE = 1000

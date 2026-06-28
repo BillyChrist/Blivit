@@ -1,3 +1,5 @@
 # Blivit Ground Station dependencies
 pyserial>=3.5
 PyQt6>=6.6
+matplotlib>=3.8
+numpy>=1.26

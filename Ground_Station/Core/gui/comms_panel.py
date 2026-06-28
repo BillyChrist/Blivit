@@ -6,7 +6,15 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 
 class _StatusLed(QLabel):
@@ -24,9 +32,13 @@ class _StatusLed(QLabel):
 
 
 class CommsStatusPanel(QFrame):
-    """Link and heartbeat summary shown above the attitude plot."""
+    """Link status and logging controls beside the attitude plot."""
 
     logging_toggled = pyqtSignal()
+    avionics_log_start = pyqtSignal()
+    avionics_log_stop = pyqtSignal()
+    avionics_log_download = pyqtSignal()
+    avionics_log_clear = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -43,18 +55,21 @@ class CommsStatusPanel(QFrame):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setSpacing(10)
 
-        title = QLabel("COMMS / HEARTBEAT")
-        title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        title = QLabel("COMS")
+        title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #888888; border: none;")
         root.addWidget(title)
 
-        log_row = QHBoxLayout()
-        log_row.setSpacing(8)
+        btn_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        status_font = QFont("Consolas", 9)
+
         self._log_btn = QPushButton("Start Logging")
-        self._log_btn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._log_btn.setFont(btn_font)
+        self._log_btn.setMinimumHeight(36)
+        self._log_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._log_btn.setStyleSheet(
             """
@@ -63,19 +78,84 @@ class CommsStatusPanel(QFrame):
                 color: #e0e0e0;
                 border: 1px solid #446644;
                 border-radius: 4px;
-                padding: 6px 14px;
+                padding: 8px 16px;
             }
             QPushButton:hover { background-color: #355a35; }
             """
         )
         self._log_btn.clicked.connect(self.logging_toggled.emit)
+        root.addWidget(self._log_btn)
+
         self._log_status = QLabel("Not recording")
-        self._log_status.setFont(QFont("Consolas", 9))
+        self._log_status.setFont(status_font)
         self._log_status.setStyleSheet("color: #777777; border: none;")
         self._log_status.setWordWrap(True)
-        log_row.addWidget(self._log_btn)
-        log_row.addWidget(self._log_status, stretch=1)
-        root.addLayout(log_row)
+        root.addWidget(self._log_status)
+
+        avionics_label = QLabel("Avionics Log")
+        avionics_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        avionics_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avionics_label.setStyleSheet("color: #aaaaaa; border: none; padding-top: 4px;")
+        root.addWidget(avionics_label)
+
+        btn_style = """
+            QPushButton {
+                background-color: #2a3a4a;
+                color: #e0e0e0;
+                border: 1px solid #445566;
+                border-radius: 4px;
+                padding: 8px 12px;
+            }
+            QPushButton:hover { background-color: #354a5a; }
+            QPushButton:disabled {
+                background-color: #222222;
+                color: #555555;
+                border-color: #333333;
+            }
+        """
+        self._avionics_start_btn = QPushButton("Remote Record")
+        self._avionics_stop_btn = QPushButton("Stop Recording")
+        self._avionics_download_btn = QPushButton("Download Log")
+        self._avionics_clear_btn = QPushButton("Clear Avionics Log")
+        clear_btn_style = """
+            QPushButton {
+                background-color: #3a2a2a;
+                color: #e0e0e0;
+                border: 1px solid #664444;
+                border-radius: 4px;
+                padding: 8px 12px;
+            }
+            QPushButton:hover { background-color: #4a3333; }
+            QPushButton:disabled {
+                background-color: #222222;
+                color: #555555;
+                border-color: #333333;
+            }
+        """
+        for btn in (self._avionics_start_btn, self._avionics_stop_btn, self._avionics_download_btn):
+            btn.setFont(btn_font)
+            btn.setMinimumHeight(36)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(btn_style)
+            root.addWidget(btn)
+        self._avionics_clear_btn.setFont(btn_font)
+        self._avionics_clear_btn.setMinimumHeight(36)
+        self._avionics_clear_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._avionics_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._avionics_clear_btn.setStyleSheet(clear_btn_style)
+        root.addWidget(self._avionics_clear_btn)
+        self._avionics_start_btn.clicked.connect(self.avionics_log_start.emit)
+        self._avionics_stop_btn.clicked.connect(self.avionics_log_stop.emit)
+        self._avionics_download_btn.clicked.connect(self.avionics_log_download.emit)
+        self._avionics_clear_btn.clicked.connect(self.avionics_log_clear.emit)
+        self._avionics_stop_btn.setEnabled(False)
+
+        self._avionics_status = QLabel("Idle")
+        self._avionics_status.setFont(status_font)
+        self._avionics_status.setStyleSheet("color: #777777; border: none;")
+        self._avionics_status.setWordWrap(True)
+        root.addWidget(self._avionics_status)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
@@ -125,6 +205,10 @@ class CommsStatusPanel(QFrame):
         grid.addWidget(self._error_label, row + 1, 0, 1, 2)
 
         root.addLayout(grid)
+        root.addStretch()
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumWidth(300)
 
     def update_status(
         self,
@@ -181,7 +265,7 @@ class CommsStatusPanel(QFrame):
                     color: #ffe0e0;
                     border: 1px solid #884444;
                     border-radius: 4px;
-                    padding: 6px 14px;
+                    padding: 8px 16px;
                 }
                 QPushButton:hover { background-color: #5a2828; }
                 """
@@ -198,10 +282,34 @@ class CommsStatusPanel(QFrame):
                     color: #e0e0e0;
                     border: 1px solid #446644;
                     border-radius: 4px;
-                    padding: 6px 14px;
+                    padding: 8px 16px;
                 }
                 QPushButton:hover { background-color: #355a35; }
                 """
             )
             self._log_status.setText("Not recording")
             self._log_status.setStyleSheet("color: #777777; border: none;")
+
+    def set_avionics_log_state(self, state: str, detail: str = "") -> None:
+        """Update avionics onboard log controls: idle | recording | downloading."""
+        if state == "recording":
+            self._avionics_start_btn.setEnabled(False)
+            self._avionics_stop_btn.setEnabled(True)
+            self._avionics_download_btn.setEnabled(False)
+            self._avionics_clear_btn.setEnabled(False)
+            self._avionics_status.setText(detail or "Recording remotely…")
+            self._avionics_status.setStyleSheet("color: #44dd66; border: none;")
+        elif state == "downloading":
+            self._avionics_start_btn.setEnabled(False)
+            self._avionics_stop_btn.setEnabled(False)
+            self._avionics_download_btn.setEnabled(False)
+            self._avionics_clear_btn.setEnabled(False)
+            self._avionics_status.setText(detail or "Downloading…")
+            self._avionics_status.setStyleSheet("color: #ffaa00; border: none;")
+        else:
+            self._avionics_start_btn.setEnabled(True)
+            self._avionics_stop_btn.setEnabled(False)
+            self._avionics_download_btn.setEnabled(True)
+            self._avionics_clear_btn.setEnabled(True)
+            self._avionics_status.setText(detail or "Idle")
+            self._avionics_status.setStyleSheet("color: #777777; border: none;")

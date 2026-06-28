@@ -1,10 +1,5 @@
 /* USER CODE BEGIN Header */
-/** ================================================================
- * Blivit Avionics Project
- *
- * Core avionics application entry and high-level system control.
- * ================================================================
- */
+/** Core avionics application entry and high-level system control. */
 /* USER CODE END Header */
 
 #ifndef MAIN_H
@@ -21,8 +16,7 @@ extern const int GPS_SCL_PIN;
 extern const int HEARTBEAT_LED_PIN;
 
 extern bool debug_mode;
-
-void Blivit_Init(void);
-void Blivit_Run(void);
+extern bool debug_binary_telemetry;
+extern bool rfd900_hw_flow_control;
 
 #endif // MAIN_H

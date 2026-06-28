@@ -1,0 +1,22 @@
+{
+  "configurations": [
+    {
+      "name": "Avionics (PlatformIO)",
+      "includePath": [
+        "${workspaceFolder}/Avionics/Core/Inc",
+        "${workspaceFolder}/Avionics/Core/Src"
+      ],
+      "defines": [
+        "ARDUINO=10812",
+        "ARDUINO_ARCH_ESP32",
+        "ESP32",
+        "ARDUINO_ESP32_DEV"
+      ],
+      "compilerPath": "",
+      "cStandard": "gnu99",
+      "cppStandard": "gnu++11",
+      "intelliSenseMode": "gcc-x64"
+    }
+  ],
+  "version": 4
+}
