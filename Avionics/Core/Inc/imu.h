@@ -2,13 +2,6 @@
 /** ================================================================
  * Blivit Avionics Project
  *
- * @attention
- * Copyright (c) 2026 Geofabrica. All rights reserved.
- *
- * License: MIT License
- *
- * Author: BillyChrist
- *
  * IMU module interface.
  * ================================================================
  */
@@ -17,11 +10,7 @@
 #ifndef IMU_H
 #define IMU_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#include <stdbool.h>
+#include <stdint.h>
 
 typedef struct
 {
@@ -34,7 +23,7 @@ typedef struct
 {
     IMU_Vector3f accel;    // m/s²
     IMU_Vector3f gyro;     // deg/s
-    IMU_Vector3f mag;      // µT or arbitrary units
+    IMU_Vector3f mag;      // raw sensor units (WitMotion protocol)
     float roll;            // degrees
     float pitch;           // degrees
     float yaw;             // degrees
@@ -45,9 +34,7 @@ extern IMU_Data_t imuData;
 
 bool IMU_Init(void);
 void IMU_Update(void);
-
-#ifdef __cplusplus
-}
-#endif
+uint32_t IMU_GetFrameCount(void);
+uint32_t IMU_GetByteCount(void);
 
 #endif // IMU_H

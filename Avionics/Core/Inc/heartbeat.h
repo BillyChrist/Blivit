@@ -2,13 +2,6 @@
 /** ================================================================
  * Blivit Avionics Project
  *
- * @attention
- * Copyright (c) 2026 Geofabrica. All rights reserved.
- *
- * License: MIT License
- *
- * Author: BillyChrist
- *
  * Heartbeat module interface.
  * ================================================================
  */
@@ -17,15 +10,13 @@
 #ifndef HEARTBEAT_H
 #define HEARTBEAT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <cstddef>
+#include <cstdint>
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <stddef.h>
+#define HEARTBEAT_PACKET_SIZE (sizeof(HeartbeatPacket_t))
 
-#define HEARTBEAT_PACKET_SIZE 48
+// TELEMETRY frame ~160 bytes @ 57600 baud (~28 ms on wire) -> 30 ms (~33 Hz) max sustained
+#define TELEMETRY_OUTPUT_INTERVAL_MS 30U
 
 typedef struct __attribute__((packed))
 {
@@ -57,11 +48,9 @@ extern HeartbeatPacket_t heartbeatPacket;
 bool Heartbeat_Init(void);
 void Heartbeat_Update(void);
 bool Heartbeat_BuildPacket(uint8_t *buffer, size_t bufferLen, size_t *packetLen);
-void heartbeat_output(void);
+void telemetry_output(void);
+void Heartbeat_CaptureSnapshot(void);
 void debug_output(void);
-
-#ifdef __cplusplus
-}
-#endif
+void heartbeat_output(void);
 
 #endif // HEARTBEAT_H

@@ -2,14 +2,12 @@
 /** ================================================================
  * Blivit Ground Station
  *
- * @attention
- * Copyright (c) 2026 Geofabrica. All rights reserved.
+ * PC ground station is implemented in Python under Ground_Station/.
+ * See Ground_Station/main.py and Ground_Station/Core/config.py
  *
- * License: MIT License
- *
- * Author: BillyChrist
- *
- * Ground station core interface.
+ * Set DEBUG_MODE to match Avionics/Core/Src/main.cpp debug_mode:
+ *   true  -> USB serial [DEBUG] / [HB] text (115200)
+ *   false -> RFD900 TELEMETRY frames (57600)
  * ================================================================
  */
 /* USER CODE END Header */
@@ -17,17 +15,6 @@
 #ifndef GROUND_STATION_H
 #define GROUND_STATION_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#include <stdbool.h>
-
-void GroundStation_Init(void);
-void GroundStation_Run(void);
-
-#ifdef __cplusplus
-}
-#endif
+/* Python entry: Ground_Station/main.py */
 
 #endif // GROUND_STATION_H

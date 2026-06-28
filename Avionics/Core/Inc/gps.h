@@ -2,13 +2,6 @@
 /** ================================================================
  * Blivit Avionics Project
  *
- * @attention
- * Copyright (c) 2026 Geofabrica. All rights reserved.
- *
- * License: MIT License
- *
- * Author: BillyChrist
- *
  * GPS sensor module interface.
  * ================================================================
  */
@@ -17,12 +10,6 @@
 #ifndef GPS_H
 #define GPS_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#include <stdbool.h>
-
 typedef struct
 {
     double latitude;
@@ -30,6 +17,9 @@ typedef struct
     float altitude;
     float speed;
     float course;
+    float vel_n;
+    float vel_e;
+    float vel_d;
 } GPS_Position_t;
 
 typedef struct
@@ -53,9 +43,7 @@ extern GPS_Data_t gpsData;
 
 bool GPS_Init(void);
 void GPS_Update(void);
-
-#ifdef __cplusplus
-}
-#endif
+bool GPS_IsReady(void);
+const GPS_Data_t *GPS_GetData(void);
 
 #endif // GPS_H

@@ -2,59 +2,92 @@
 
 ## Chosen path: Arduino framework with PlatformIO
 
-For fastest development and the most pre-built library support, this project is using the Arduino framework on ESP32 via PlatformIO.
+This project uses the **Arduino framework on ESP32** via PlatformIO.
 
-- Keeps the setup simple and easy to install
-- Uses existing ESP32 Arduino libraries for GPS and IMU
-- Avoids needing a deeper ESP-IDF learning curve right now
-- Still allows your C modules to remain the main logic
+- Simple toolchain and library management
+- Native ESP32 Arduino APIs for UART, I²C, and USB serial
+- All application source is **C++** under `Avionics/Core/`
 
-## Keep `blivit_main.c`
+## Project layout
 
-Your existing `Avionics/Core/Src/blivit_main.c` can remain the main entry point.
-It is fine to keep the core application in C while using Arduino-style libraries for peripherals.
+```
+Avionics/
+├── platformio.ini          # src_dir = Core/Src, include_dir = Core/Inc
+└── Core/
+    ├── Inc/                  # Module headers
+    └── Src/                  # Module implementations (.cpp)
+        ├── main.cpp          # Entry point, pin map, debug_mode, setup/loop
+        ├── gps.cpp           # SAM-M8Q over I²C
+        ├── imu.cpp           # HWT905 over UART (WitMotion protocol)
+        ├── rfd900.cpp        # RFD900x radio link
+        ├── heartbeat.cpp     # Telemetry packet + output routing
+        └── serial_debug.cpp  # USB serial @ 115200
+```
 
-This means:
-- Continue writing the main logic in C
-- Use C++ Arduino libraries only for peripheral drivers
-- If needed, add minimal C++ glue wrappers around those libraries
+Open **`Avionics/`** as the PlatformIO project root (the folder containing `platformio.ini`).
 
-## Libraries and packages for your peripherals
+## Libraries
 
-### GPS
+### In use (PlatformIO `lib_deps`)
 
-- `TinyGPSPlus`
-- `SparkFun_Ublox_Arduino_Library`
-- `NMEAGPS`
+| Library | Peripheral | Notes |
+|---------|------------|-------|
+| SparkFun u-blox GNSS Arduino Library | SAM-M8Q GPS | I²C @ 100 kHz, UBX auto-PVT |
 
-### IMU / AHRS
+### Not used — custom drivers instead
 
-- `MPU9250_asukiaaa`
-- `SparkFun 9DoF IMU`
-- `MadgwickAHRS` / `MahonyAHRS`
+| Peripheral | Approach |
+|------------|----------|
+| HWT905-TTL IMU | WitMotion standard serial protocol (`0x55` frames) in `imu.cpp` — **not** a raw MPU9250 I²C library |
+| RFD900x | Transparent UART + Blivit text framing in `rfd900.cpp` |
 
-### RFD900x
+Previously considered but **not** in the project: TinyGPSPlus, NMEAGPS, MPU9250_asukiaaa, Madgwick/Mahony AHRS libraries.
 
-- No dedicated library is required.
-- Use UART and implement a small handshake protocol.
-- If desired, use a general serial packet framing library like `RadioHead`.
+## Runtime modes (`debug_mode`)
 
-## RFD900x handshake protocol (basic)
+Configured in `Avionics/Core/Src/main.cpp`:
 
-1. Open the UART port to the radio.
-2. Send a short initialization packet such as `HELLO` or `PING`.
-3. Wait for a reply such as `ACK` or `READY`.
-4. After acknowledgement, begin telemetry send/receive.
+```cpp
+bool debug_mode = true;   // bench: USB serial telemetry
+bool debug_mode = false;  // field: RFD900 radio telemetry
+```
 
-### Example protocol outline
+| Mode | Init | Main loop output |
+|------|------|------------------|
+| Debug (`true`) | GPS, IMU, heartbeat only | `telemetry_output()` → USB `[DEBUG]` + `[HB]` |
+| Field (`false`) | Above + `RFD900_Init()` | `RFD900_Process()` → handshake + radio frames |
 
-- Send: `Blivit,HELLO,1` or `PING`
-- Receive: `ACK` or `Blivit,READY`
-- Then begin telemetry frames:
-  - `TELEMETRY,<seq>,<payload>,<crc>`
-  - `ACK,<seq>`
+USB serial boot messages appear in **both** modes.
+
+## RFD900x protocol
+
+Hardware: transparent serial modem, default **57600 baud**, 8N1, 3.3 V logic.  
+Optional hardware flow control on GPIO 14 (RTS) / 27 (CTS).
+
+Application framing:
+
+1. Send `Blivit,HELLO,1` or `PING`
+2. Receive `ACK`, `ACK,<seq>`, or `Blivit,READY`
+3. Send telemetry: `TELEMETRY,<seq>,<hex_payload>,<crc>`
+4. Receive `ACK,<seq>`
+
+The hex payload is the packed `HeartbeatPacket_t` (see `heartbeat.h`).
+
+## Heartbeat packet
+
+68-byte packed struct: sequence, uptime, system state, GPS fix/sats, lat/lon/alt/speed/course, accel/gyro/mag, Modbus-style CRC16.
+
+- `system_state = 1` — debug mode (USB serial)
+- `system_state = 2` — field mode (RFD900)
+
+## Build and flash
+
+From PlatformIO (project folder `Avionics/`):
+
+1. **Build** — compile firmware
+2. **Upload** — flash ESP32 over USB
+3. **Monitor** — serial monitor @ **115200**
 
 ## Notes
 
-This document now assumes Arduino/PlatformIO is the primary development path.
-If you later we want a more embedded C workflow, ESP-IDF can still be considered, but only after the prototype stage.
+Arduino/PlatformIO is the primary development path. ESP-IDF remains an option later if needed, but is not used today.
