@@ -25,6 +25,8 @@ extern "C" {
 
 extern const int RFD900_TX_PIN;
 extern const int RFD900_RX_PIN;
+extern const int RFD900_CTS_PIN;
+extern const int RFD900_RTS_PIN;
 extern const int HWT905_TX_PIN;
 extern const int HWT905_RX_PIN;
 extern const int GPS_SDA_PIN;

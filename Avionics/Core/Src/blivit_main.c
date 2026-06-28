@@ -23,26 +23,27 @@
  */
 /* USER CODE END Header */
 
+// Includes
 #include "blivit_main.h"
 #include "heartbeat.h"
 #include "rfd900.h"
 #include "gps.h"
 #include "imu.h"
 
-// Pinout Schedule for ESP32 DevKit V1
-// The ESP32 has 3 hardware UARTs: UART0, UART1, UART2.
-// UART0 is normally used by the USB-serial interface for programming and console output.
-// Use UART1 and UART2 for external serial peripherals.
 
-const int RFD900_TX_PIN     = 18; // UART1 TX
-const int RFD900_RX_PIN     = 19; // UART1 RX
-
-const int HWT905_TX_PIN      = 4; // UART2 TX
-const int HWT905_RX_PIN      = 5; // UART2 RX
-
-const int GPS_SDA_PIN       = 21; // I2C SDA for Qwiic GPS
-const int GPS_SCL_PIN       = 22; // I2C SCL for Qwiic GPS
-
+// ===== ESP32 Pinout Schedule =====
+// RFD900x
+const int RFD900_TX_PIN     = 25; // ESP32 TX -> RFD900 RX
+const int RFD900_RX_PIN     = 26; // ESP32 RX <- RFD900 TX
+const int RFD900_CTS_PIN    = 27; // ESP32 CTS <- RFD900 RTS (if enabled)
+const int RFD900_RTS_PIN    = 14; // ESP32 RTS -> RFD900 CTS (if enabled)
+// IMU
+const int HWT905_TX_PIN      = 4; // UART2 TX (GPIO 16 -RX)
+const int HWT905_RX_PIN      = 5; // UART2 RX (GPIO 17 -TX)
+// GPS
+const int GPS_SDA_PIN       = 21; // I2C SDA for Qwiic GPS (GPIO 21)
+const int GPS_SCL_PIN       = 22; // I2C SCL for Qwiic GPS (GPIO 22)
+// Internal
 const int HEARTBEAT_LED_PIN  = 2; // On-board LED / status indicator
 
 
