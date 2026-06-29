@@ -2,6 +2,7 @@
 
 #include "avionics_command.h"
 #include "serial_debug.h"
+#include "telemetry_sample.h"
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -11,7 +12,8 @@
 
 #define AVIONICS_LOG_PATH "/avionics_telem.csv"
 #define AVIONICS_LOG_FLUSH_ROWS 64U
-#define AVIONICS_LOG_CHUNK_BYTES 64U
+#define AVIONICS_LOG_CHUNK_BYTES 128U
+#define AVIONICS_LOG_END_REPEATS 3U
 
 static File log_file;
 static bool fs_ready = false;
@@ -21,6 +23,45 @@ static uint32_t log_row_count = 0;
 static uint32_t log_sequence = 0;
 static size_t download_offset = 0;
 static uint32_t download_seq = 0;
+static uint8_t download_end_repeats = 0;
+static File download_file;
+
+static const char *AvionicsLog_SourceName(uint8_t source_mask)
+{
+    if ((source_mask & TELEMETRY_SOURCE_GPS) && (source_mask & TELEMETRY_SOURCE_IMU))
+    {
+        return "gps+imu";
+    }
+
+    if (source_mask & TELEMETRY_SOURCE_GPS)
+    {
+        return "gps";
+    }
+
+    if (source_mask & TELEMETRY_SOURCE_IMU)
+    {
+        return "imu";
+    }
+
+    return "periodic";
+}
+
+static const char *AvionicsLog_ImuFrameName(uint8_t frame_type)
+{
+    switch (frame_type)
+    {
+    case 0x51U:
+        return "accel";
+    case 0x52U:
+        return "gyro";
+    case 0x53U:
+        return "angle";
+    case 0x54U:
+        return "mag";
+    default:
+        return "--";
+    }
+}
 
 static bool AvionicsLog_OpenFresh(void)
 {
@@ -36,8 +77,8 @@ static bool AvionicsLog_OpenFresh(void)
     }
 
     static const char *header =
-        "sequence,uptime_ms,source,gps_valid,gps_satellites,hdop,latitude,longitude,altitude,"
-        "speed,course,vel_n,vel_e,vel_d,climb_rate,roll,pitch,yaw,temperature,imu_frames,imu_bytes,"
+        "sequence,uptime_ms,source,source_mask,gps_updates,gps_valid,gps_satellites,hdop,latitude,longitude,altitude,"
+        "speed,course,vel_n,vel_e,vel_d,climb_rate,roll,pitch,yaw,temperature,imu_frames,imu_frame_type,imu_bytes,"
         "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,utc,date\n";
     log_file.print(header);
     log_file.flush();
@@ -79,7 +120,7 @@ bool AvionicsLog_Start(void)
     }
 
     recording = true;
-    SerialDebug_Print("[LOG] recording @ sensor-loop rate (independent of RFD/telemetry cadence)");
+    SerialDebug_Print("[LOG] recording — one CSV row per IMU frame + GPS updates (heartbeat independent)");
     return true;
 }
 
@@ -127,10 +168,13 @@ bool AvionicsLog_Append(const TelemetrySample_t *sample)
     const int written = std::snprintf(
         line,
         sizeof(line),
-        "%lu,%lu,avionics,%u,%u,%.1f,%.6f,%.6f,%.1f,%.2f,%.1f,%.2f,%.2f,%.2f,%.2f,"
-        "%.2f,%.2f,%.2f,%.2f,%lu,%lu,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%s,%s\n",
+        "%lu,%lu,%s,%u,%lu,%u,%u,%.1f,%.6f,%.6f,%.1f,%.2f,%.1f,%.2f,%.2f,%.2f,%.2f,"
+        "%.2f,%.2f,%.2f,%.2f,%lu,%s,%lu,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%s,%s\n",
         static_cast<unsigned long>(log_sequence),
         static_cast<unsigned long>(sample->uptime_ms),
+        AvionicsLog_SourceName(sample->source_mask),
+        sample->source_mask,
+        static_cast<unsigned long>(sample->gps_updates),
         sample->gps_valid,
         sample->gps_satellites,
         sample->hdop,
@@ -148,6 +192,7 @@ bool AvionicsLog_Append(const TelemetrySample_t *sample)
         sample->yaw,
         sample->temperature,
         static_cast<unsigned long>(sample->imu_frames),
+        AvionicsLog_ImuFrameName(sample->imu_frame_type),
         static_cast<unsigned long>(sample->imu_bytes),
         sample->accel_x,
         sample->accel_y,
@@ -227,12 +272,31 @@ bool AvionicsLog_BeginDownload(void)
     downloading = true;
     download_offset = 0;
     download_seq = 0;
+    download_end_repeats = 0;
+
+    if (download_file)
+    {
+        download_file.close();
+    }
+
+    download_file = LittleFS.open(AVIONICS_LOG_PATH, "r");
+    if (!download_file)
+    {
+        downloading = false;
+        return false;
+    }
+
     return true;
 }
 
 void AvionicsLog_CancelDownload(void)
 {
     downloading = false;
+    download_end_repeats = 0;
+    if (download_file)
+    {
+        download_file.close();
+    }
 }
 
 bool AvionicsLog_IsDownloading(void)
@@ -270,36 +334,42 @@ bool AvionicsLog_SendNextChunk(void)
         return false;
     }
 
-    File f = LittleFS.open(AVIONICS_LOG_PATH, "r");
-    if (!f)
+    if (!download_file)
     {
         downloading = false;
         return false;
     }
 
-    const size_t total = f.size();
-    if (download_offset >= total)
+    const size_t total = download_file.size();
+
+    if (download_end_repeats > 0U)
     {
-        f.close();
         char end_line[48];
         std::snprintf(end_line, sizeof(end_line), "Blivit,LOG,END,%u", static_cast<unsigned>(total));
         Blivit_SendLine(end_line);
-        downloading = false;
+        download_end_repeats--;
+        if (download_end_repeats == 0U)
+        {
+            downloading = false;
+            download_file.close();
+        }
         return true;
     }
 
-    f.seek(download_offset);
+    if (download_offset >= total)
+    {
+        download_end_repeats = AVIONICS_LOG_END_REPEATS;
+        return true;
+    }
+
+    download_file.seek(download_offset);
     uint8_t buffer[AVIONICS_LOG_CHUNK_BYTES];
     const size_t to_read = std::min(static_cast<size_t>(AVIONICS_LOG_CHUNK_BYTES), total - download_offset);
-    const size_t nbytes = f.read(buffer, to_read);
-    f.close();
+    const size_t nbytes = download_file.read(buffer, to_read);
 
     if (nbytes == 0)
     {
-        char end_line[48];
-        std::snprintf(end_line, sizeof(end_line), "Blivit,LOG,END,%u", static_cast<unsigned>(total));
-        Blivit_SendLine(end_line);
-        downloading = false;
+        download_end_repeats = AVIONICS_LOG_END_REPEATS;
         return true;
     }
 
@@ -312,7 +382,7 @@ bool AvionicsLog_SendNextChunk(void)
     }
     hex[hex_index] = '\0';
 
-    char frame[320];
+    char frame[512];
     std::snprintf(frame, sizeof(frame), "Blivit,LOG,DATA,%u,%s", download_seq, hex);
     Blivit_SendLine(frame);
     download_seq++;

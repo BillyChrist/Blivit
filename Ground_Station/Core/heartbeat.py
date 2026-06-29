@@ -1,5 +1,5 @@
 """
-Heartbeat packet — matches Avionics/Core/Inc/heartbeat.h (HeartbeatPacket_t, 68 bytes).
+Heartbeat packet — matches Avionics/Core/Inc/heartbeat.h (HeartbeatPacket_t, 84 bytes).
 """
 
 from __future__ import annotations
@@ -8,8 +8,8 @@ import struct
 from dataclasses import dataclass
 from typing import Optional
 
-HEARTBEAT_PACKET_SIZE = 68
-HEARTBEAT_STRUCT = struct.Struct("<HIBBBB14fH")
+HEARTBEAT_PACKET_SIZE = 84
+HEARTBEAT_STRUCT = struct.Struct("<HIBBBB18fH")
 
 
 @dataclass
@@ -34,6 +34,10 @@ class HeartbeatPacket:
     mag_x: float
     mag_y: float
     mag_z: float
+    roll: float
+    pitch: float
+    yaw: float
+    temperature: float
     crc: int
 
     @property
@@ -85,6 +89,10 @@ def decode_packet(raw: bytes) -> Optional[HeartbeatPacket]:
         mag_x=fields[17],
         mag_y=fields[18],
         mag_z=fields[19],
+        roll=fields[20],
+        pitch=fields[21],
+        yaw=fields[22],
+        temperature=fields[23],
         crc=stored_crc,
     )
 

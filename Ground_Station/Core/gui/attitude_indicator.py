@@ -338,6 +338,10 @@ class AttitudeDisplay(QWidget):
         return self.comms.logging_toggled
 
     @property
+    def timestamp_record_toggled(self):
+        return self.comms.timestamp_record_toggled
+
+    @property
     def avionics_log_start(self):
         return self.comms.avionics_log_start
 
@@ -355,6 +359,9 @@ class AttitudeDisplay(QWidget):
 
     def set_logging_state(self, active: bool, filepath: str = "") -> None:
         self.comms.set_logging_state(active, filepath)
+
+    def set_timestamp_record_state(self, active: bool, detail: str = "") -> None:
+        self.comms.set_timestamp_record_state(active, detail)
 
     def set_avionics_log_state(self, state: str, detail: str = "") -> None:
         self.comms.set_avionics_log_state(state, detail)

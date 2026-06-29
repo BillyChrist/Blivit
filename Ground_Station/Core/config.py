@@ -20,11 +20,13 @@ RFD900_SERIAL_PORT = "COM7"
 RFD900_BAUD = 57600
 
 # Telemetry cadence — keep in sync with Avionics/Core/Inc/heartbeat.h
-# TELEMETRY_OUTPUT_INTERVAL_MS = 30 ms (~33 Hz) on RFD900 @ 57600 (binary ~160 B/frame)
-# USB debug @ 115200: one combined [DEBUG] line @ 33 Hz (~9 KB/s) fits; two lines saturated link.
-# Set debug_binary_telemetry=true in avionics main.cpp to send TELEMETRY hex on USB (RFD sim).
+# TELEMETRY_OUTPUT_INTERVAL_MS = 30 ms: sensor sample, onboard CSV, USB debug (~33 Hz)
+# RFD900_TELEMETRY_INTERVAL_MS = 100 ms: field radio only (~10 Hz, ~1.9 KB/s on wire)
+#   Wire frame is fixed ~190 B (84 B binary → 168 hex + TELEMETRY,seq,crc,\\r\\n overhead).
+#   30 ms on RFD would be ~6.3 KB/s — exceeds 57600 (~5.8 KB/s usable).
 TELEMETRY_INTERVAL_MS = 30
-TELEMETRY_STALE_MS = 120  # ~4 missed packets before STALE
+RFD900_TELEMETRY_INTERVAL_MS = 100
+TELEMETRY_STALE_MS = 450  # ~4–5 missed RFD frames before STALE
 GUI_REFRESH_MS = 33
 STATUS_LOG_INTERVAL_MS = 5000
 

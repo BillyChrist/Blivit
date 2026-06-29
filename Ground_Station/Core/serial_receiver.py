@@ -137,7 +137,7 @@ class SerialDebugParser:
             self._pending = None
             return complete
 
-        if HB_LINE.match(line) or line.startswith("TELEMETRY,"):
+        if HB_LINE.match(line) or line.startswith("TELEMETRY,") or line.startswith("[HB]"):
             return None
 
         if line.startswith("[") and not line.startswith("[DEBUG]") and not line.startswith("[HB]"):

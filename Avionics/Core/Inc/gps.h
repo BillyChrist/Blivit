@@ -10,6 +10,8 @@
 #ifndef GPS_H
 #define GPS_H
 
+#include <stdint.h>
+
 typedef struct
 {
     double latitude;
@@ -44,6 +46,7 @@ extern GPS_Data_t gpsData;
 bool GPS_Init(void);
 void GPS_Update(void);
 bool GPS_IsReady(void);
+uint32_t GPS_GetUpdateCount(void);
 const GPS_Data_t *GPS_GetData(void);
 
 #endif // GPS_H

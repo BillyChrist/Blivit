@@ -151,6 +151,9 @@ class GroundStationWindow(QMainWindow):
         self._max_startup_attempts = 3
         self._stale_since: float | None = None
         self._last_reconnect_attempt = 0.0
+        self._avionics_download_ui_active = False
+        self._timestamp_record_active = False
+        self._avionics_recording = False
 
         self.setWindowTitle("Blivit Ground Station")
         self.resize(1100, 720)
@@ -215,10 +218,19 @@ class GroundStationWindow(QMainWindow):
             self._on_avionics_log_event_ui,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._log_bridge.avionics_download_done.connect(
+            self._on_avionics_download_done,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._log_bridge.avionics_download_failed.connect(
+            self._on_avionics_download_failed,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._station.set_boot_logger(self._log_bridge.write)
         self._station.set_avionics_log_event_handler(self._log_bridge.emit_avionics_event)
 
         self._attitude.logging_toggled.connect(self._toggle_csv_logging)
+        self._attitude.timestamp_record_toggled.connect(self._toggle_timestamp_record)
         self._attitude.avionics_log_start.connect(self._avionics_log_start)
         self._attitude.avionics_log_stop.connect(self._avionics_log_stop)
         self._attitude.avionics_log_download.connect(self._avionics_log_download)
@@ -443,6 +455,8 @@ class GroundStationWindow(QMainWindow):
                 self._append_log(f"Ground station CSV logging stopped: {path.name}")
                 self._analytics.notify_log_saved(path)
             self._attitude.set_logging_state(False)
+            if self._timestamp_record_active:
+                self._end_timestamp_session("Ground-station log stopped", stopped="gs")
             return
 
         try:
@@ -455,6 +469,130 @@ class GroundStationWindow(QMainWindow):
         self._append_log(f"Ground station CSV logging started: {path.name}")
         self._attitude.set_logging_state(True, str(path))
         self._analytics.refresh_file_list()
+
+    def _clear_timestamp_record_state(self, detail: str = "") -> None:
+        self._timestamp_record_active = False
+        self._attitude.set_timestamp_record_state(False, detail)
+
+    def _end_timestamp_session(self, reason: str, *, stopped: str) -> None:
+        """Stop the other logger when one side of a timestamp session ends."""
+        if stopped != "avionics" and self._avionics_recording:
+            try:
+                self._station.avionics_log_stop()
+            except Exception as exc:
+                self._append_log(f"Timestamp record: avionics stop failed: {exc}")
+            self._avionics_recording = False
+            self._release_avionics_log_controls("Ready to download")
+
+        if stopped != "gs" and self._station.is_csv_logging():
+            path = self._station.stop_csv_logging()
+            if path is not None:
+                self._analytics.notify_log_saved(path)
+            self._attitude.set_logging_state(False)
+
+        self._clear_timestamp_record_state(reason)
+        self._append_log(f"Timestamp record ended: {reason}")
+
+    def _toggle_timestamp_record(self) -> None:
+        if not self._startup_complete:
+            self._append_log("Timestamp record: serial not ready")
+            return
+
+        if self._timestamp_record_active:
+            self._stop_timestamp_record()
+            return
+
+        self._start_timestamp_record()
+
+    def _start_timestamp_record(self) -> None:
+        if self._station.is_csv_logging() or self._avionics_recording:
+            self._append_log("Timestamp record: stop existing logs before starting a new session")
+            return
+
+        self._ensure_avionics_log_unlocked()
+
+        latest = self._station.telemetry.get_latest()
+        sync_uptime_ms = latest.uptime_ms if latest is not None else None
+
+        self._timestamp_record_active = True
+        self._avionics_recording = True
+        self._attitude.set_timestamp_record_state(True, "Starting both logs…")
+        self._attitude.set_avionics_log_state("recording", "Starting…")
+        self._attitude.set_logging_state(True, "Starting…")
+
+        avionics_ok = False
+        gs_ok = False
+        gs_path = None
+
+        try:
+            self._station.avionics_log_start()
+            avionics_ok = True
+        except Exception as exc:
+            self._append_log(f"Timestamp record: avionics start failed: {exc}")
+
+        try:
+            gs_path = self._station.start_csv_logging()
+            gs_ok = True
+            self._attitude.set_logging_state(True, str(gs_path))
+            self._analytics.refresh_file_list()
+        except OSError as exc:
+            self._append_log(f"Timestamp record: ground-station start failed: {exc}")
+            self._attitude.set_logging_state(False)
+
+        if avionics_ok and gs_ok and gs_path is not None:
+            detail = f"Recording — GS {gs_path.name}"
+            if sync_uptime_ms is not None:
+                detail += f" · uptime {sync_uptime_ms} ms"
+            self._attitude.set_timestamp_record_state(True, detail)
+            self._append_log(
+                "Timestamp record started: avionics remote record + "
+                f"{gs_path.name}"
+                + (f" (uptime {sync_uptime_ms} ms)" if sync_uptime_ms is not None else "")
+            )
+            return
+
+        if gs_ok:
+            path = self._station.stop_csv_logging()
+            if path is not None:
+                self._append_log(f"Timestamp record rollback: stopped {path.name}")
+            self._attitude.set_logging_state(False)
+
+        if avionics_ok:
+            try:
+                self._station.avionics_log_stop()
+            except Exception:
+                pass
+
+        self._avionics_recording = False
+        self._release_avionics_log_controls("Start failed — ready to retry")
+        self._clear_timestamp_record_state("Start failed")
+
+    def _stop_timestamp_record(self) -> None:
+        if not self._timestamp_record_active:
+            return
+
+        stopped: list[str] = []
+        if self._avionics_recording:
+            try:
+                self._station.avionics_log_stop()
+                self._attitude.set_avionics_log_state("recording", "Stopping…")
+                stopped.append("avionics")
+            except Exception as exc:
+                self._append_log(f"Timestamp record: avionics stop failed: {exc}")
+
+        if self._station.is_csv_logging():
+            path = self._station.stop_csv_logging()
+            if path is not None:
+                stopped.append(f"GS ({path.name})")
+                self._analytics.notify_log_saved(path)
+            self._attitude.set_logging_state(False)
+
+        self._avionics_recording = False
+        self._clear_timestamp_record_state(
+            "Stopped" if stopped else "Start avionics + ground-station logs together"
+        )
+        if stopped:
+            self._append_log(f"Timestamp record stopped: {', '.join(stopped)}")
 
     def _sync_logging_ui(self) -> None:
         if self._station.is_csv_logging():
@@ -472,54 +610,122 @@ class GroundStationWindow(QMainWindow):
             self._append_log(f"Onboard storage query failed: {exc}")
 
     def _on_avionics_log_event_ui(self, line: str) -> None:
-        if "Start recording trigger received" in line:
+        if "Start recording trigger received" in line or line.startswith("Blivit,LOG,OK,START"):
+            self._avionics_recording = True
             self._attitude.set_avionics_log_state("recording")
         elif "Stop recording trigger received" in line:
-            self._attitude.set_avionics_log_state("idle", "Ready to download")
+            self._avionics_recording = False
+            if self._timestamp_record_active:
+                self._end_timestamp_session("Avionics log stopped", stopped="avionics")
+            nbytes = self._station.onboard_log_bytes
+            if nbytes and nbytes > 0:
+                kb = nbytes / 1024.0
+                self._release_avionics_log_controls(f"Ready to download ({kb:.1f} KB on device)")
+            else:
+                self._release_avionics_log_controls("Ready to download")
+        elif line.startswith("Blivit,LOG,OK,STOP,"):
+            self._avionics_recording = False
+            if self._timestamp_record_active:
+                self._end_timestamp_session("Avionics log stopped", stopped="avionics")
+            nbytes = self._station.onboard_log_bytes
+            if nbytes and nbytes > 0:
+                kb = nbytes / 1024.0
+                rows = self._station.onboard_log_rows
+                detail = f"Ready to download ({kb:.1f} KB"
+                if rows > 0:
+                    detail += f", {rows} rows"
+                detail += " on device)"
+                self._release_avionics_log_controls(detail)
+            else:
+                self._release_avionics_log_controls("Ready to download")
         elif line.startswith("Blivit,LOG,ERR,"):
-            self._attitude.set_avionics_log_state("idle")
+            self._avionics_recording = False
+            if self._timestamp_record_active:
+                self._clear_timestamp_record_state("Avionics command failed")
+            self._release_avionics_log_controls("Command failed — ready to retry")
         elif "Download accepted" in line:
-            self._attitude.set_avionics_log_state("downloading", "Receiving…")
+            if self._avionics_download_ui_active:
+                self._attitude.set_avionics_log_state("downloading", "Receiving…")
+        elif line.startswith("Blivit,LOG,OK,ABORT"):
+            self._release_avionics_log_controls("Download cancelled — ready to retry")
+        elif line.startswith("Blivit,LOG,END,"):
+            if self._avionics_download_ui_active:
+                nbytes = self._station.onboard_log_bytes
+                if nbytes and nbytes > 0:
+                    kb = nbytes / 1024.0
+                    self._release_avionics_log_controls(f"Download complete ({kb:.1f} KB saved)")
+                else:
+                    self._release_avionics_log_controls("Download complete")
+            else:
+                self._release_avionics_log_controls("Ready to download")
         elif "Onboard flight data cleared" in line:
-            self._attitude.set_avionics_log_state("idle", "Flash log cleared")
+            self._release_avionics_log_controls("Flash log cleared")
+
+    def _release_avionics_log_controls(self, detail: str = "Idle") -> None:
+        """Re-enable avionics log buttons after download completes, fails, or is cancelled."""
+        self._avionics_download_ui_active = False
+        self._attitude.set_avionics_log_state("idle", detail)
+
+    def _ensure_avionics_log_unlocked(self) -> None:
+        """Recover from a stuck download state so Record / Download / Clear work again."""
+        if self._avionics_download_ui_active or self._station.is_avionics_downloading():
+            self._station.cancel_avionics_download()
+            self._release_avionics_log_controls("Recovered — ready to retry")
 
     def _avionics_log_clear(self) -> None:
         if not self._startup_complete:
             self._append_log("Avionics log: serial not ready")
             return
+        self._ensure_avionics_log_unlocked()
         try:
             self._station.avionics_log_clear()
             self._append_log("Sending clear flight data command…")
         except Exception as exc:
             self._append_log(f"Clear flight data failed: {exc}")
+            self._release_avionics_log_controls("Clear failed — ready to retry")
 
     def _avionics_log_start(self) -> None:
         if not self._startup_complete:
             self._append_log("Avionics log: serial not ready")
             return
+        self._ensure_avionics_log_unlocked()
         try:
             self._attitude.set_avionics_log_state("recording", "Starting…")
+            self._avionics_recording = True
             self._station.avionics_log_start()
             self._append_log("Sending remote record command…")
         except Exception as exc:
+            self._avionics_recording = False
             self._append_log(f"Avionics log start failed: {exc}")
-            self._attitude.set_avionics_log_state("idle")
+            self._release_avionics_log_controls("Start failed — ready to retry")
 
     def _avionics_log_stop(self) -> None:
         if not self._startup_complete:
             return
+        self._ensure_avionics_log_unlocked()
         try:
             self._attitude.set_avionics_log_state("recording", "Stopping…")
             self._station.avionics_log_stop()
             self._append_log("Sending stop recording command…")
         except Exception as exc:
             self._append_log(f"Avionics log stop failed: {exc}")
+            self._release_avionics_log_controls("Stop failed — ready to retry")
+            return
+        self._avionics_recording = False
+        if self._timestamp_record_active:
+            self._end_timestamp_session("Avionics stop sent", stopped="avionics")
+            return
 
     def _avionics_log_download(self) -> None:
         if not self._startup_complete:
             self._append_log("Avionics log: serial not ready")
             return
+        if self._avionics_download_ui_active:
+            self._append_log("Avionics log download already in progress")
+            return
 
+        self._ensure_avionics_log_unlocked()
+        self._avionics_download_ui_active = True
         self._attitude.set_avionics_log_state("downloading")
         self._append_log("Requesting ESP32 log download…")
 
@@ -527,21 +733,25 @@ class GroundStationWindow(QMainWindow):
             try:
                 path = self._station.download_avionics_log()
             except Exception as exc:
-                message = str(exc)
-                QTimer.singleShot(0, lambda m=message: self._on_avionics_download_failed(m))
+                self._log_bridge.emit_download_failed(str(exc))
                 return
-            QTimer.singleShot(0, lambda p=path: self._on_avionics_download_done(p))
+            self._log_bridge.emit_download_done(str(path))
 
         threading.Thread(target=work, name="avionics-log-download", daemon=True).start()
 
-    def _on_avionics_download_done(self, path) -> None:
-        self._attitude.set_avionics_log_state("idle", path.name)
-        self._append_log(f"Saved ESP32 log: {path}")
+    def _on_avionics_download_done(self, path: str) -> None:
+        from pathlib import Path
+
+        saved = Path(path)
+        self._release_avionics_log_controls(saved.name)
+        self._append_log(f"Saved ESP32 log: {saved}")
         self._analytics.refresh_file_list()
-        self._analytics.notify_log_saved(path)
+        self._analytics.notify_log_saved(saved)
 
     def _on_avionics_download_failed(self, message: str) -> None:
-        self._attitude.set_avionics_log_state("idle")
+        self._station.cancel_avionics_download()
+        short = message if len(message) <= 120 else message[:117] + "…"
+        self._release_avionics_log_controls(f"Download failed — {short}")
         self._append_log(f"ESP32 log download failed: {message}")
 
     def _refresh(self) -> None:
@@ -573,6 +783,10 @@ class GroundStationWindow(QMainWindow):
         self._update_imu(snap)
 
     def _link_state_from_telemetry(self, state) -> str:
+        if self._station.is_avionics_downloading() and self._station.is_serial_link_alive(
+            TELEMETRY_STALE_MS
+        ):
+            return "live"
         if state.latest is None:
             return "waiting"
         age_ms = (time.monotonic() - state.latest.received_at) * 1000.0
@@ -584,6 +798,9 @@ class GroundStationWindow(QMainWindow):
         mode = "Debug (USB serial)" if self._station.debug_mode else "Field (RFD900)"
         port = self._station.port or "—"
         baud = self._station.baud or 0
+        downloading = self._station.is_avionics_downloading()
+        serial_age_ms = self._station.serial_age_ms()
+        serial_alive = self._station.is_serial_link_alive(TELEMETRY_STALE_MS)
 
         if self._serial_error and not self._station.reader_alive:
             link_state = "error"
@@ -592,21 +809,33 @@ class GroundStationWindow(QMainWindow):
             uptime_ms = None
             age_ms = None
             source = None
+        elif downloading and serial_alive:
+            link_state = "live"
+            error = None
+            snap = state.latest
+            sequence = snap.sequence if snap is not None else None
+            uptime_ms = snap.uptime_ms if snap is not None else None
+            source = snap.source if snap is not None else "download"
+            age_ms = serial_age_ms
         elif state.latest is None:
-            link_state = "waiting"
+            link_state = "waiting" if (serial_alive or not downloading) else "stale"
             error = None
             sequence = None
             uptime_ms = None
-            age_ms = None
+            age_ms = serial_age_ms
             source = None
         else:
             error = None
             snap = state.latest
             age_ms = (time.monotonic() - snap.received_at) * 1000.0
+            if downloading and serial_alive:
+                link_state = "live"
+                age_ms = min(age_ms, serial_age_ms or age_ms)
+            else:
+                link_state = "stale" if age_ms > TELEMETRY_STALE_MS else "live"
             sequence = snap.sequence
             uptime_ms = snap.uptime_ms
             source = snap.source
-            link_state = "stale" if age_ms > TELEMETRY_STALE_MS else "live"
 
         self._attitude.update_comms(
             port=port,
@@ -624,7 +853,10 @@ class GroundStationWindow(QMainWindow):
         if self._serial_error:
             self._status_link.setText("Link: error")
             self._status_link.setStyleSheet("color: #ff4444;")
-        elif state.latest is None:
+        elif link_state == "live" and downloading:
+            self._status_link.setText("Link: live (downloading)")
+            self._status_link.setStyleSheet("color: #44dd66;")
+        elif state.latest is None and not serial_alive:
             self._status_link.setText("Link: waiting…")
             self._status_link.setStyleSheet("color: #ffaa00;")
         elif link_state == "stale":
@@ -707,6 +939,8 @@ class GroundStationWindow(QMainWindow):
 
     def _log_periodic_status(self) -> None:
         if not self._startup_complete:
+            return
+        if self._station.is_avionics_downloading():
             return
         if not self._station.reader_alive and not self._station.serial_is_open:
             return

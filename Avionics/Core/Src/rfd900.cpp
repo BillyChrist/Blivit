@@ -137,7 +137,7 @@ void RFD900_Process(void)
     }
 
     if (rfd900_link_state == RFD900_LinkState::Linked &&
-        (now - rfd900_last_telemetry_ms) >= TELEMETRY_OUTPUT_INTERVAL_MS)
+        (now - rfd900_last_telemetry_ms) >= RFD900_TELEMETRY_INTERVAL_MS)
     {
         if (RFD900_SendHeartbeatTelemetry())
         {

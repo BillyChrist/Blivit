@@ -1,6 +1,7 @@
 #include "avionics_command.h"
 
 #include "avionics_log.h"
+#include "log_queue.h"
 #include "main.h"
 #include "rfd900.h"
 #include "serial_debug.h"
@@ -90,7 +91,12 @@ bool AvionicsCommand_HandleLine(const char *line)
         if (AvionicsLog_Stop())
         {
             const uint32_t bytes = AvionicsLog_GetFileBytes();
+            const uint32_t rows = AvionicsLog_GetRowCount();
             const float kb = static_cast<float>(bytes) / 1024.0f;
+            CommandReply(
+                "Blivit,LOG,OK,STOP,%lu,%lu",
+                static_cast<unsigned long>(bytes),
+                static_cast<unsigned long>(rows));
             CommandReply(
                 "Blivit,LOG,ACK,Stop recording trigger received! File size: %.1f KB",
                 kb);
@@ -105,10 +111,11 @@ bool AvionicsCommand_HandleLine(const char *line)
     if (std::strcmp(cmd, "STAT") == 0)
     {
         CommandReply(
-            "Blivit,LOG,STAT,recording=%u,rows=%lu,bytes=%lu",
+            "Blivit,LOG,STAT,recording=%u,rows=%lu,bytes=%lu,dropped=%lu",
             AvionicsLog_IsRecording() ? 1U : 0U,
             static_cast<unsigned long>(AvionicsLog_GetRowCount()),
-            static_cast<unsigned long>(AvionicsLog_GetFileBytes()));
+            static_cast<unsigned long>(AvionicsLog_GetFileBytes()),
+            static_cast<unsigned long>(LogQueue_GetDroppedCount()));
         CommandReplyStorageInfo();
         return true;
     }
@@ -123,7 +130,7 @@ bool AvionicsCommand_HandleLine(const char *line)
                 static_cast<unsigned long>(AvionicsLog_GetFileBytes()));
             CommandReply(
                 "Blivit,LOG,ACK,Download accepted — streaming onboard CSV over serial "
-                "(telemetry paused until complete)");
+                "(heartbeat slowed to 500 ms during download)");
         }
         else
         {
@@ -193,8 +200,8 @@ void AvionicsCommand_Tick(void)
     }
 
     const uint32_t now = millis();
-    /* USB @ 115200 ≈ 11 KB/s; 64 B chunk ≈ 150 B/line → ~15 ms/chunk with margin */
-    const uint32_t interval_ms = debug_mode ? 15U : 40U;
+    /* 128 B chunk ≈ 300 B/line @ 115200 → ~12 ms/chunk with margin */
+    const uint32_t interval_ms = debug_mode ? 12U : 35U;
     if ((now - last_download_chunk_ms) < interval_ms)
     {
         return;

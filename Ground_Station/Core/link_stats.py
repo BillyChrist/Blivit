@@ -63,6 +63,15 @@ class LinkStatsTracker:
         if self.stats.handshake in ("none", "remote_hello", "hello"):
             self.stats.handshake = "telemetry"
 
+    def note_serial_rx(self) -> None:
+        """Any line received on the serial port (telemetry, log download, ACK, …)."""
+        self.stats.last_rx_monotonic = time.monotonic()
+
+    def serial_age_ms(self) -> Optional[float]:
+        if self.stats.last_rx_monotonic is None:
+            return None
+        return (time.monotonic() - self.stats.last_rx_monotonic) * 1000.0
+
     def set_link_state(self, state: str) -> None:
         self.stats.link_state = state
 

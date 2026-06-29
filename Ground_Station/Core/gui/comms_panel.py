@@ -12,8 +12,10 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
+    QWidget,
 )
 
 
@@ -35,6 +37,7 @@ class CommsStatusPanel(QFrame):
     """Link status and logging controls beside the attitude plot."""
 
     logging_toggled = pyqtSignal()
+    timestamp_record_toggled = pyqtSignal()
     avionics_log_start = pyqtSignal()
     avionics_log_stop = pyqtSignal()
     avionics_log_download = pyqtSignal()
@@ -65,6 +68,32 @@ class CommsStatusPanel(QFrame):
 
         btn_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
         status_font = QFont("Consolas", 9)
+
+        self._timestamp_btn = QPushButton("Timestamp Record")
+        self._timestamp_btn.setFont(btn_font)
+        self._timestamp_btn.setMinimumHeight(36)
+        self._timestamp_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._timestamp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._timestamp_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #3a2a4a;
+                color: #e0e0e0;
+                border: 1px solid #665588;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover { background-color: #4a355a; }
+            """
+        )
+        self._timestamp_btn.clicked.connect(self.timestamp_record_toggled.emit)
+        root.addWidget(self._timestamp_btn)
+
+        self._timestamp_status = QLabel("Start avionics + ground-station logs together")
+        self._timestamp_status.setFont(status_font)
+        self._timestamp_status.setStyleSheet("color: #777777; border: none;")
+        self._timestamp_status.setWordWrap(True)
+        root.addWidget(self._timestamp_status)
 
         self._log_btn = QPushButton("Start Logging")
         self._log_btn.setFont(btn_font)
@@ -157,7 +186,17 @@ class CommsStatusPanel(QFrame):
         self._avionics_status.setWordWrap(True)
         root.addWidget(self._avionics_status)
 
-        grid = QGridLayout()
+        _ROW_HEIGHT = 26
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(6)
         grid.setColumnStretch(1, 1)
@@ -179,8 +218,10 @@ class CommsStatusPanel(QFrame):
             name = QLabel(label_text)
             name.setFont(font_label)
             name.setStyleSheet("color: #777777; border: none;")
+            name.setMinimumHeight(_ROW_HEIGHT)
             value = QLabel("—")
             value.setFont(font_value)
+            value.setMinimumHeight(_ROW_HEIGHT)
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             value.setStyleSheet("color: #e8e8e8; border: none;")
             grid.addWidget(name, row, 0)
@@ -191,8 +232,10 @@ class CommsStatusPanel(QFrame):
         link_name = QLabel("Link")
         link_name.setFont(font_label)
         link_name.setStyleSheet("color: #777777; border: none;")
+        link_name.setMinimumHeight(_ROW_HEIGHT)
         self._link_led = _StatusLed("● OFFLINE")
         self._link_led.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self._link_led.setMinimumHeight(_ROW_HEIGHT)
         self._link_led.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         grid.addWidget(link_name, row, 0)
         grid.addWidget(self._link_led, row, 1)
@@ -204,8 +247,9 @@ class CommsStatusPanel(QFrame):
         self._error_label.hide()
         grid.addWidget(self._error_label, row + 1, 0, 1, 2)
 
-        root.addLayout(grid)
-        root.addStretch()
+        inner.setMinimumHeight((row + 2) * _ROW_HEIGHT + max(0, row + 1) * 6 + 8)
+        scroll.setWidget(inner)
+        root.addWidget(scroll, stretch=1)
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumWidth(300)
@@ -289,6 +333,42 @@ class CommsStatusPanel(QFrame):
             )
             self._log_status.setText("Not recording")
             self._log_status.setStyleSheet("color: #777777; border: none;")
+
+    def set_timestamp_record_state(self, active: bool, detail: str = "") -> None:
+        if active:
+            self._timestamp_btn.setText("Stop Timestamp Record")
+            self._timestamp_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #4a2040;
+                    color: #ffe0f0;
+                    border: 1px solid #885566;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                }
+                QPushButton:hover { background-color: #5a2850; }
+                """
+            )
+            self._timestamp_status.setText(detail or "Timestamp record active")
+            self._timestamp_status.setStyleSheet("color: #44dd66; border: none;")
+        else:
+            self._timestamp_btn.setText("Timestamp Record")
+            self._timestamp_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: #3a2a4a;
+                    color: #e0e0e0;
+                    border: 1px solid #665588;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                }
+                QPushButton:hover { background-color: #4a355a; }
+                """
+            )
+            self._timestamp_status.setText(
+                detail or "Start avionics + ground-station logs together"
+            )
+            self._timestamp_status.setStyleSheet("color: #777777; border: none;")
 
     def set_avionics_log_state(self, state: str, detail: str = "") -> None:
         """Update avionics onboard log controls: idle | recording | downloading."""

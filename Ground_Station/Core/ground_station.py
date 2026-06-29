@@ -31,7 +31,9 @@ from link_stats import LinkStats, LinkStatsTracker
 from avionics_log_client import (
     AvionicsLogDownloadSession,
     format_avionics_log_console_line,
+    format_download_progress,
     format_firmware_console_line,
+    parse_onboard_log_protocol,
 )
 from rfd900_receiver import handle_incoming_line
 from serial_receiver import SerialDebugParser
@@ -62,6 +64,9 @@ class GroundStation:
         self._avionics_download_lock = threading.Lock()
         self._avionics_log_event: Optional[Callable[[str], None]] = None
         self._serial_fault: Optional[str] = None
+        self._onboard_log_bytes: Optional[int] = None
+        self._onboard_log_rows: int = 0
+        self._log_end_announced = False
 
     def set_avionics_log_event_handler(self, handler: Callable[[str], None]) -> None:
         """Called for avionics LOG ack/err/end events (GUI may update state)."""
@@ -94,6 +99,16 @@ class GroundStation:
         with self._avionics_download_lock:
             return self._avionics_download is not None
 
+    def cancel_avionics_download(self, *, send_abort: bool = True) -> None:
+        """Clear any in-progress GS download session and tell avionics to stop streaming."""
+        with self._avionics_download_lock:
+            self._avionics_download = None
+        if send_abort and self._serial is not None and self._serial.is_open:
+            try:
+                self.send_command("Blivit,LOG,ABORT")
+            except Exception:
+                pass
+
     @property
     def serial_fault(self) -> Optional[str]:
         return self._serial_fault
@@ -105,6 +120,14 @@ class GroundStation:
     @property
     def serial_is_open(self) -> bool:
         return self._serial is not None and self._serial.is_open
+
+    @property
+    def onboard_log_bytes(self) -> Optional[int]:
+        return self._onboard_log_bytes
+
+    @property
+    def onboard_log_rows(self) -> int:
+        return self._onboard_log_rows
 
     def set_boot_logger(self, handler: Callable[[str], None]) -> None:
         self._boot_logger = handler
@@ -119,6 +142,13 @@ class GroundStation:
 
     def update_link_state(self, state: str) -> None:
         self._link_stats.set_link_state(state)
+
+    def serial_age_ms(self) -> Optional[float]:
+        return self._link_stats.serial_age_ms()
+
+    def is_serial_link_alive(self, stale_ms: float) -> bool:
+        age = self.serial_age_ms()
+        return age is not None and age <= stale_ms
 
     def init(self, *, quiet: bool = False) -> None:
         self._quiet = quiet
@@ -312,7 +342,7 @@ class GroundStation:
         self,
         path: str | Path | None = None,
         *,
-        timeout_s: float = 120.0,
+        timeout_s: float = 300.0,
     ) -> Path:
         if self._serial is None or not self._serial.is_open:
             raise RuntimeError("Serial port is not open")
@@ -333,17 +363,14 @@ class GroundStation:
                 return
             last_logged_at = now
 
-            kb = nbytes / 1024.0
-            if total_bytes and total_bytes > 0:
-                pct = min(100, int(nbytes * 100 / total_bytes))
-                total_kb = total_bytes / 1024.0
-                self._boot_logger(
-                    f"Downloading… {pct}% ({kb:.0f} / {total_kb:.0f} KB)"
-                )
-            else:
-                self._boot_logger(f"Downloading… {kb:.0f} KB received")
+            total = total_bytes or self._onboard_log_bytes
+            self._boot_logger(format_download_progress(nbytes, total))
 
-        session = AvionicsLogDownloadSession(on_progress=on_progress, on_started=on_started)
+        session = AvionicsLogDownloadSession(
+            on_progress=on_progress,
+            on_started=on_started,
+            fallback_size=self._onboard_log_bytes,
+        )
         with self._avionics_download_lock:
             if self._avionics_download is not None:
                 raise RuntimeError("Avionics log download already in progress")
@@ -361,10 +388,7 @@ class GroundStation:
                 )
             return dest
         except Exception:
-            try:
-                self.send_command("Blivit,LOG,ABORT")
-            except Exception:
-                pass
+            self.cancel_avionics_download(send_abort=True)
             raise
         finally:
             with self._avionics_download_lock:
@@ -416,6 +440,8 @@ class GroundStation:
         if not raw:
             return
 
+        self._link_stats.note_serial_rx()
+
         try:
             line = raw.decode("utf-8", errors="replace")
         except UnicodeDecodeError:
@@ -431,12 +457,30 @@ class GroundStation:
         if not line.startswith("Blivit,LOG,"):
             return False
 
+        info = parse_onboard_log_protocol(line)
+        if info is not None:
+            self._onboard_log_bytes = info.bytes
+            self._onboard_log_rows = info.rows
+
+        if line.startswith("Blivit,LOG,OK,DL"):
+            self._log_end_announced = False
+
+        if line.startswith("Blivit,LOG,OK,CLEAR") or "Onboard flight data cleared" in line:
+            self._onboard_log_bytes = 0
+            self._onboard_log_rows = 0
+
         with self._avionics_download_lock:
             session = self._avionics_download
         if session is not None:
             session.feed_line(line)
 
         console_text = format_avionics_log_console_line(line)
+        # Firmware sends Blivit,LOG,END three times for link reliability; log once.
+        if console_text and line.startswith("Blivit,LOG,END,"):
+            if self._log_end_announced:
+                console_text = None
+            else:
+                self._log_end_announced = True
         if console_text and self._boot_logger is not None:
             self._boot_logger(console_text)
 
@@ -453,6 +497,9 @@ class GroundStation:
         if stripped.startswith("Blivit,HELLO,"):
             self._link_stats.note_handshake("remote_hello")
 
+        if stripped.startswith("[HB]") or stripped.startswith("LEMETRY,"):
+            return
+
         if stripped.startswith("TELEMETRY,"):
             result = handle_incoming_line(line)
             if result is None:
@@ -467,7 +514,9 @@ class GroundStation:
                     wire_format="binary",
                     payload_bytes=HEARTBEAT_PACKET_SIZE,
                 )
-                self.telemetry.publish(TelemetrySnapshot.from_heartbeat(packet))
+                self.telemetry.publish(
+                    TelemetrySnapshot.from_heartbeat(packet, source="debug")
+                )
             return
 
         telemetry = self._debug_parser.feed_line(line)

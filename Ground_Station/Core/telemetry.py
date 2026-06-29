@@ -97,12 +97,12 @@ class TelemetrySnapshot:
         )
 
     @classmethod
-    def from_heartbeat(cls, packet: HeartbeatPacket) -> TelemetrySnapshot:
+    def from_heartbeat(cls, packet: HeartbeatPacket, *, source: str = "field") -> TelemetrySnapshot:
         return cls(
             received_at=time.monotonic(),
             sequence=packet.sequence,
             uptime_ms=packet.uptime_ms,
-            source="field",
+            source=source,
             gps_valid=bool(packet.gps_fix),
             gps_satellites=packet.gps_satellites,
             hdop=0.0,
@@ -115,10 +115,10 @@ class TelemetrySnapshot:
             vel_e=0.0,
             vel_d=0.0,
             climb_rate=0.0,
-            roll=0.0,
-            pitch=0.0,
-            yaw=0.0,
-            temperature=0.0,
+            roll=packet.roll,
+            pitch=packet.pitch,
+            yaw=packet.yaw,
+            temperature=packet.temperature,
             accel_x=packet.accel_x,
             accel_y=packet.accel_y,
             accel_z=packet.accel_z,

@@ -5,6 +5,7 @@
 #include "gps.h"
 #include "heartbeat.h"
 #include "imu.h"
+#include "log_queue.h"
 #include "main.h"
 #include "rfd900.h"
 #include "serial_debug.h"
@@ -21,10 +22,13 @@
 #define COMMS_TASK_STACK 6144U
 #define SENSOR_TASK_PRIORITY 2U
 #define COMMS_TASK_PRIORITY 2U
+#define LOG_TASK_STACK 4096U
+#define LOG_TASK_PRIORITY 1U
 #define SENSOR_LOOP_DELAY_MS 5U
 
 static void SensorTask(void *param);
 static void CommsTask(void *param);
+static void LogTask(void *param);
 
 void Tasks_Start(void)
 {
@@ -45,6 +49,15 @@ void Tasks_Start(void)
         COMMS_TASK_PRIORITY,
         nullptr,
         COMMS_TASK_CORE);
+
+    xTaskCreatePinnedToCore(
+        LogTask,
+        "blivit-log",
+        LOG_TASK_STACK,
+        nullptr,
+        LOG_TASK_PRIORITY,
+        nullptr,
+        SENSOR_TASK_CORE);
 }
 
 static void SensorTask(void *param)
@@ -54,12 +67,12 @@ static void SensorTask(void *param)
     GPS_Init();
     IMU_Init();
 
-    SerialDebug_Print("[TASK] sensor core=%d — GPS I2C + IMU UART (high-fidelity log + %u ms telemetry queue)",
+    SerialDebug_Print("[TASK] sensor core=%d — GPS I2C + IMU UART (%u ms heartbeat snapshot)",
                       SENSOR_TASK_CORE,
                       static_cast<unsigned>(TELEMETRY_OUTPUT_INTERVAL_MS));
 
-    TelemetrySample_t sample{};
     uint32_t last_publish_ms = 0;
+    uint32_t last_logged_gps_updates = 0;
 
     for (;;)
     {
@@ -67,19 +80,34 @@ static void SensorTask(void *param)
         IMU_Update();
 
         const uint32_t now = millis();
-        const bool publish_due = (now - last_publish_ms) >= TELEMETRY_OUTPUT_INTERVAL_MS;
-        const bool need_sample = AvionicsLog_IsRecording() || publish_due;
 
-        if (need_sample && TelemetrySample_BuildFromSensors(&sample))
+        const uint32_t gps_updates = GPS_GetUpdateCount();
+        const bool gps_new = gps_updates != last_logged_gps_updates;
+
+        if (AvionicsLog_IsRecording() && gps_new)
         {
-            if (AvionicsLog_IsRecording())
+            TelemetrySample_t log_sample{};
+            if (TelemetrySample_BuildFromSensors(&log_sample))
             {
-                AvionicsLog_Append(&sample);
-            }
+                log_sample.source_mask = TELEMETRY_SOURCE_GPS;
+                log_sample.imu_frame_type = 0U;
+                LogQueue_Publish(&log_sample);
 
-            if (publish_due)
+                last_logged_gps_updates = gps_updates;
+            }
+        }
+
+        const bool publish_due = (now - last_publish_ms) >=
+            (AvionicsLog_IsDownloading() ? TELEMETRY_DOWNLOAD_INTERVAL_MS
+                                         : TELEMETRY_OUTPUT_INTERVAL_MS);
+
+        if (publish_due)
+        {
+            TelemetrySample_t heartbeat_sample{};
+            if (TelemetrySample_BuildFromSensors(&heartbeat_sample))
             {
-                TelemetryQueue_Publish(&sample);
+                heartbeat_sample.source_mask = TELEMETRY_SOURCE_PERIODIC;
+                TelemetryQueue_Publish(&heartbeat_sample);
                 last_publish_ms = now;
             }
         }
@@ -103,7 +131,6 @@ static void CommsTask(void *param)
         debug_mode ? "USB debug telemetry" : "RFD900 + heartbeat");
 
     TelemetrySample_t latest{};
-    bool has_sample = false;
 
     for (;;)
     {
@@ -119,22 +146,45 @@ static void CommsTask(void *param)
             RFD900_PollIncoming();
         }
 
-        TelemetryQueue_DrainToLatest(&latest, &has_sample);
+        TelemetrySample_t incoming{};
+        bool got_new_sample = false;
+        TelemetryQueue_DrainToLatest(&incoming, &got_new_sample);
 
-        if (has_sample && !AvionicsLog_IsDownloading())
+        if (got_new_sample)
         {
+            latest = incoming;
             Heartbeat_UpdateFromSample(&latest);
 
             if (debug_mode)
             {
                 telemetry_output();
             }
-            else
-            {
-                RFD900_Process();
-            }
+        }
+
+        if (!debug_mode && !AvionicsLog_IsDownloading())
+        {
+            RFD900_Process();
         }
 
         vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+static void LogTask(void *param)
+{
+    (void)param;
+
+    SerialDebug_Print("[TASK] log core=%d — drain queue -> LittleFS CSV", SENSOR_TASK_CORE);
+
+    for (;;)
+    {
+        TelemetrySample_t sample{};
+        if (LogQueue_Receive(&sample, 50U))
+        {
+            if (AvionicsLog_IsRecording())
+            {
+                AvionicsLog_Append(&sample);
+            }
+        }
     }
 }

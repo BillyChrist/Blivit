@@ -4,7 +4,7 @@
  *
  * Component: WitMotion HWT905-TTL AHRS / IMU sensor
  *
- * WitMotion standard serial protocol @ 9600 baud (factory default).
+ * WitMotion standard serial protocol @ 115200 baud (100 Hz accel/gyro/angle/mag).
  * Frame: 0x55 | TYPE | 8 data bytes | checksum
  * ================================================================
  */
@@ -14,13 +14,18 @@
 #include "main.h"
 #include "serial_debug.h"
 
+#include "avionics_log.h"
+#include "log_queue.h"
+#include "telemetry_sample.h"
+
 #include <Arduino.h>
 
 #include <cstdint>
 #include <cstring>
 
-// WitMotion HWT905 defaults (see Documentation + WitMotion SDK protocol)
-#define HWT905_BAUD 9600
+// WitMotion HWT905 — configured to 115200 baud / 100 Hz in IMU_Init()
+#define HWT905_BAUD 115200
+#define HWT905_FACTORY_BAUD 9600
 #define HWT905_FRAME_SIZE 11
 #define HWT905_HEADER 0x55
 #define HWT905_TYPE_ACCEL 0x51
@@ -57,6 +62,9 @@ static int16_t IMU_DecodeInt16(uint8_t low, uint8_t high);
 static bool IMU_ValidateFrame(const uint8_t *frame);
 static void IMU_ParseFrame(const uint8_t *frame);
 static void IMU_ProcessByte(uint8_t byte);
+static void IMU_LogParsedFrame(uint8_t frame_type);
+static void IMU_SendConfigByte(uint8_t reg, uint8_t value);
+static void IMU_ConfigureSensor(void);
 static float IMU_ScaleAccel(int16_t raw);
 static float IMU_ScaleGyro(int16_t raw);
 static float IMU_ScaleAngle(int16_t raw);
@@ -69,17 +77,47 @@ bool IMU_Init(void)
     imuTelemetryHold = {};
     imuTelemetryValid = 0U;
 
-    imu_serial.begin(HWT905_BAUD, SERIAL_8N1, HWT905_RX_PIN, HWT905_TX_PIN);
+    imu_serial.setRxBufferSize(2048);
+    imu_serial.begin(HWT905_FACTORY_BAUD, SERIAL_8N1, HWT905_RX_PIN, HWT905_TX_PIN);
     rx_index = 0;
     imu_ready = true;
 
+    IMU_ConfigureSensor();
+
+    imu_serial.end();
+    delay(50);
+    imu_serial.setRxBufferSize(2048);
+    imu_serial.begin(HWT905_BAUD, SERIAL_8N1, HWT905_RX_PIN, HWT905_TX_PIN);
+
     SerialDebug_Print(
-        "[IMU] HWT905 ready on UART2 (TX=%d RX=%d @ %d baud)",
+        "[IMU] HWT905 ready on UART2 (TX=%d RX=%d @ %d baud, 100 Hz output)",
         HWT905_TX_PIN,
         HWT905_RX_PIN,
         HWT905_BAUD);
 
     return imu_ready;
+}
+
+static void IMU_SendConfigByte(uint8_t reg, uint8_t value)
+{
+    const uint8_t cmd[5] = {0xFF, 0xAA, reg, value, 0x00};
+    imu_serial.write(cmd, sizeof(cmd));
+    imu_serial.flush();
+    delay(20);
+}
+
+static void IMU_ConfigureSensor(void)
+{
+    const uint8_t unlock[5] = {0xFF, 0xAA, 0x69, 0x88, 0xB5};
+    imu_serial.write(unlock, sizeof(unlock));
+    imu_serial.flush();
+    delay(100);
+
+    IMU_SendConfigByte(0x03, 0x09); // 100 Hz return rate
+    IMU_SendConfigByte(0x04, 0x06); // 115200 baud
+    IMU_SendConfigByte(0x00, 0x00); // save
+
+    SerialDebug_Print("[IMU] configured for 100 Hz @ 115200 baud");
 }
 
 void IMU_Update(void)
@@ -241,8 +279,28 @@ static void IMU_ParseFrame(const uint8_t *frame)
     }
 
     default:
-        break;
+        return;
     }
+
+    IMU_LogParsedFrame(type);
+}
+
+static void IMU_LogParsedFrame(uint8_t frame_type)
+{
+    if (!AvionicsLog_IsRecording())
+    {
+        return;
+    }
+
+    TelemetrySample_t sample{};
+    if (!TelemetrySample_BuildFromSensors(&sample))
+    {
+        return;
+    }
+
+    sample.source_mask = TELEMETRY_SOURCE_IMU;
+    sample.imu_frame_type = frame_type;
+    LogQueue_Publish(&sample);
 }
 
 static void IMU_ProcessByte(uint8_t byte)

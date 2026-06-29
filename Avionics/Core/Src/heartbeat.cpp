@@ -69,12 +69,19 @@ void Heartbeat_UpdateFromSample(const TelemetrySample_t *sample)
     heartbeatPacket.mag_x = sample->mag_x;
     heartbeatPacket.mag_y = sample->mag_y;
     heartbeatPacket.mag_z = sample->mag_z;
+    heartbeatPacket.roll = sample->roll;
+    heartbeatPacket.pitch = sample->pitch;
+    heartbeatPacket.yaw = sample->yaw;
+    heartbeatPacket.temperature = sample->temperature;
 }
 
 void telemetry_output(void)
 {
     debug_output();
-    heartbeat_output();
+    if (!(debug_mode && debug_binary_telemetry))
+    {
+        heartbeat_output();
+    }
 }
 
 void heartbeat_output(void)
@@ -124,10 +131,10 @@ void heartbeat_output(void)
     SerialDebug_Print(
         "[HB] imu r=%.2f p=%.2f y=%.2f temp=%.2f "
         "accel_g=(%.3f,%.3f,%.3f) gyro=(%.2f,%.2f,%.2f) mag=(%.1f,%.1f,%.1f)",
-        heartbeatSample.roll,
-        heartbeatSample.pitch,
-        heartbeatSample.yaw,
-        heartbeatSample.temperature,
+        heartbeatPacket.roll,
+        heartbeatPacket.pitch,
+        heartbeatPacket.yaw,
+        heartbeatPacket.temperature,
         Heartbeat_AccelToG(heartbeatPacket.accel_x),
         Heartbeat_AccelToG(heartbeatPacket.accel_y),
         Heartbeat_AccelToG(heartbeatPacket.accel_z),

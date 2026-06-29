@@ -29,6 +29,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 
 static SFE_UBLOX_GNSS gnss;
 
@@ -57,6 +58,8 @@ typedef struct
 static bool gps_connected = false;
 static uint32_t last_gps_retry_ms = 0;
 static uint32_t last_gps_rx_ms = 0;
+static uint32_t gps_update_count = 0;
+static uint32_t last_pvt_itow_ms = UINT32_MAX;
 
 #define GPS_RETRY_INTERVAL_MS 5000U
 #define GPS_I2C_STALE_MS 15000U
@@ -117,14 +120,24 @@ void GPS_Update(void)
     {
         last_gps_rx_ms = now;
     }
-    else if ((now - last_gps_rx_ms) >= GPS_I2C_STALE_MS)
+
+    if (!gnss.getPVT())
     {
-        /* No UBX for 15 s — likely I2C loss or auto-PVT not running; force reconnect. */
-        GPS_MarkDisconnected("no UBX NAV data for 15 s — reconnecting");
+        if ((now - last_gps_rx_ms) >= GPS_I2C_STALE_MS)
+        {
+            GPS_MarkDisconnected("no UBX NAV-PVT for 15 s — reconnecting");
+        }
         return;
     }
 
-    GPS_Reading_t reading;
+    const uint32_t pvt_itow_ms = gnss.getTimeOfWeek();
+    if (pvt_itow_ms == last_pvt_itow_ms)
+    {
+        return;
+    }
+    last_pvt_itow_ms = pvt_itow_ms;
+
+    GPS_Reading_t reading{};
     if (!GPS_ReadModule(&reading))
     {
         return;
@@ -132,6 +145,7 @@ void GPS_Update(void)
 
     GPS_ApplyReading(&reading);
     GPS_FormatStatusStrings(&reading);
+    gps_update_count++;
 
     // Periodic GPS diagnostic if debug_message enabled
     if (debug_message)
@@ -142,8 +156,9 @@ void GPS_Update(void)
         {
             last_gps_debug_ms = debug_now;
             SerialDebug_Print(
-                "[GPSDBG] ready=%d fix_valid=%d fix_type=%u sats=%d hdop=%.1f lat=%.6f lon=%.6f utc=%02u:%02u:%02u date=%04u-%02u-%02u",
+                "[GPSDBG] ready=%d update=%lu fix_valid=%d fix_type=%u sats=%d hdop=%.1f lat=%.6f lon=%.6f utc=%02u:%02u:%02u date=%04u-%02u-%02u",
                 GPS_IsReady() ? 1 : 0,
+                static_cast<unsigned long>(gps_update_count),
                 reading.fix_valid ? 1 : 0,
                 reading.fix_type,
                 reading.satellites,
@@ -158,6 +173,11 @@ void GPS_Update(void)
                 reading.day);
         }
     }
+}
+
+uint32_t GPS_GetUpdateCount(void)
+{
+    return gps_update_count;
 }
 
 bool GPS_IsReady(void)
@@ -192,12 +212,6 @@ static bool GPS_ConfigureModule(void)
         ok = false;
     }
 
-    if (!gnss.setAutoDOP(true, true, 500))
-    {
-        SerialDebug_Print("[GPS] config failed: setAutoDOP");
-        ok = false;
-    }
-
     if (!gnss.setMeasurementRate(250))
     {
         SerialDebug_Print("[GPS] config failed: setMeasurementRate 250 ms");
@@ -224,6 +238,7 @@ static bool GPS_TryConnect(void)
     }
 
     last_gps_rx_ms = millis();
+    last_pvt_itow_ms = UINT32_MAX;
     return true;
 }
 

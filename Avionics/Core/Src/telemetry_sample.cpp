@@ -65,6 +65,7 @@ bool TelemetrySample_BuildFromSensors(TelemetrySample_t *out)
         out->mag_z = imu.mag.z;
     }
 
+    out->gps_updates = GPS_GetUpdateCount();
     out->imu_frames = IMU_GetFrameCount();
     out->imu_bytes = IMU_GetByteCount();
 

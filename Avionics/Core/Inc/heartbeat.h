@@ -17,13 +17,22 @@
 
 #define HEARTBEAT_PACKET_SIZE (sizeof(HeartbeatPacket_t))
 
-// Field mode (RFD900 @ 57600): binary TELEMETRY frame ~160 B -> 30 ms (~33 Hz) max.
-// Onboard CSV logging on Core 1 is NOT gated by this — it runs every sensor loop (~5 ms).
+// Sensor sample + onboard CSV + USB debug cadence (Core 1 publish / queue).
 #define TELEMETRY_OUTPUT_INTERVAL_MS 30U
+
+// Field mode (RFD900 @ 57600): ASCII TELEMETRY frame is fixed ~190 B
+//   (TELEMETRY,<seq>,<168 hex chars>,<crc>\\r\\n for 84-byte binary payload).
+// At 30 ms (~33 Hz) that is ~6.3 KB/s — over 57600 wire budget (~5.8 KB/s).
+// RFD uses a slower interval; high-rate data stays on onboard flash.
+#define RFD900_TELEMETRY_INTERVAL_MS 100U
 
 // Debug mode (USB @ 115200): same cadence as field when using one line or binary TELEMETRY.
 // Two-line text @ 33 Hz exceeds 115200 (~11.5 KB/s); use DEBUG_TELEMETRY_BINARY or one line.
 #define DEBUG_TELEMETRY_INTERVAL_MS TELEMETRY_OUTPUT_INTERVAL_MS
+
+// During onboard log download, heartbeat continues at a slower rate so the ground
+// station link indicator stays live while LOG,DATA chunks share the serial port.
+#define TELEMETRY_DOWNLOAD_INTERVAL_MS 500U
 
 typedef struct __attribute__((packed))
 {
@@ -47,6 +56,10 @@ typedef struct __attribute__((packed))
     float mag_x;
     float mag_y;
     float mag_z;
+    float roll;
+    float pitch;
+    float yaw;
+    float temperature;
     uint16_t crc;
 } HeartbeatPacket_t;
 

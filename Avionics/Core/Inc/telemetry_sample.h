@@ -7,10 +7,18 @@
 
 #include <cstdint>
 
+#define TELEMETRY_SOURCE_PERIODIC 0x00U
+#define TELEMETRY_SOURCE_GPS 0x01U
+#define TELEMETRY_SOURCE_IMU 0x02U
+
 typedef struct
 {
     uint32_t sample_time_ms;
     uint32_t uptime_ms;
+
+    uint8_t source_mask;
+    uint32_t gps_updates;
+    uint8_t imu_frame_type;
 
     uint8_t gps_valid;
     uint8_t gps_satellites;
