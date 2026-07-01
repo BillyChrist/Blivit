@@ -14,11 +14,11 @@ from pathlib import Path
 from typing import Optional
 
 # Debug mode — avionics USB serial (same format as PlatformIO monitor @ 115200)
-DEBUG_SERIAL_PORT = "COM6"  # ESP32 USB COM port on your PC
+DEBUG_SERIAL_PORT = "COM5"  # ESP32 USB COM port on your PC
 DEBUG_BAUD = 115200
 
 # Field mode — ground-side RFD900 modem (matches avionics RFD900 @ 57600)
-RFD900_SERIAL_PORT = "COM4"
+RFD900_SERIAL_PORT = "COM6"
 RFD900_BAUD = 57600
 
 # Telemetry cadence — keep in sync with Avionics/Core/Inc/heartbeat.h
@@ -29,6 +29,9 @@ RFD900_BAUD = 57600
 TELEMETRY_INTERVAL_MS = 30
 RFD900_TELEMETRY_INTERVAL_MS = 100
 TELEMETRY_STALE_MS = 450  # ~4–5 missed RFD frames before STALE
+# USB serial on Windows can deliver lines in driver-sized bursts; use a looser
+# threshold in debug so bursty reads are not mistaken for a dead link.
+DEBUG_TELEMETRY_STALE_MS = 3000
 GUI_REFRESH_MS = 33
 STATUS_LOG_INTERVAL_MS = 5000
 

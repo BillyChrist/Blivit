@@ -16,12 +16,14 @@ from config import (
     AVIONICS_MAIN_CPP,
     DEBUG_BAUD,
     DEBUG_SERIAL_PORT,
+    DEBUG_TELEMETRY_STALE_MS,
     RFD900_BAUD,
     RFD900_SERIAL_PORT,
     SERIAL_OPEN_RETRIES,
     SERIAL_OPEN_RETRY_DELAY_S,
     SERIAL_OPEN_INITIAL_DELAY_S,
     TELEMETRY_INTERVAL_MS,
+    TELEMETRY_STALE_MS,
     SERIAL_RECONNECT_COOLDOWN_S,
     SERIAL_STALE_RECONNECT_MS,
     resolve_debug_mode,
@@ -91,6 +93,10 @@ class GroundStation:
     def set_serial_settings(self, port: str, baud: int) -> None:
         self._port = port
         self._baud = baud
+
+    @property
+    def telemetry_stale_ms(self) -> float:
+        return DEBUG_TELEMETRY_STALE_MS if self._debug_mode else TELEMETRY_STALE_MS
 
     @property
     def csv_log_path(self) -> Path | None:
@@ -252,7 +258,7 @@ class GroundStation:
                 ser = serial.Serial(
                     port,
                     baud,
-                    timeout=0.1,
+                    timeout=0.05,
                     dsrdtr=False,
                     rtscts=False,
                 )
@@ -449,25 +455,31 @@ class GroundStation:
 
     def _poll(self) -> None:
         assert self._serial is not None
-        try:
-            raw = self._serial.readline()
-        except serial.SerialException as exc:
-            self._serial_fault = str(exc)
-            raise
-        if not raw:
-            return
+        # Drain buffered lines in one pass — Windows USB-serial drivers often
+        # deliver several frames at once; processing one line per wake adds jitter.
+        while True:
+            try:
+                raw = self._serial.readline()
+            except serial.SerialException as exc:
+                self._serial_fault = str(exc)
+                raise
+            if not raw:
+                break
 
-        self._link_stats.note_serial_rx()
+            self._link_stats.note_serial_rx()
 
-        try:
-            line = raw.decode("utf-8", errors="replace")
-        except UnicodeDecodeError:
-            return
+            try:
+                line = raw.decode("utf-8", errors="replace")
+            except UnicodeDecodeError:
+                continue
 
-        if self._debug_mode:
-            self._handle_debug_line(line)
-        else:
-            self._handle_radio_line(line)
+            if self._debug_mode:
+                self._handle_debug_line(line)
+            else:
+                self._handle_radio_line(line)
+
+            if self._serial.in_waiting == 0:
+                break
 
     def _feed_avionics_log_line(self, line: str) -> bool:
         """Return True if the line is avionics-log protocol (not live telemetry)."""

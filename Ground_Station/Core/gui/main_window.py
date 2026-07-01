@@ -41,7 +41,6 @@ from config import (
     SERIAL_RECONNECT_POLL_MS,
     SERIAL_STALE_RECONNECT_MS,
     STATUS_LOG_INTERVAL_MS,
-    TELEMETRY_STALE_MS,
     load_gui_settings,
     save_gui_settings,
 )
@@ -966,14 +965,15 @@ class GroundStationWindow(QMainWindow):
         self._update_imu(snap)
 
     def _link_state_from_telemetry(self, state) -> str:
+        stale_ms = self._station.telemetry_stale_ms
         if self._station.is_avionics_downloading() and self._station.is_serial_link_alive(
-            TELEMETRY_STALE_MS
+            stale_ms
         ):
             return "live"
         if state.latest is None:
             return "waiting"
         age_ms = (time.monotonic() - state.latest.received_at) * 1000.0
-        if age_ms > TELEMETRY_STALE_MS:
+        if age_ms > stale_ms:
             return "stale"
         return "live"
 
@@ -982,8 +982,9 @@ class GroundStationWindow(QMainWindow):
         port = self._station.port or "—"
         baud = self._station.baud or 0
         downloading = self._station.is_avionics_downloading()
+        stale_ms = self._station.telemetry_stale_ms
         serial_age_ms = self._station.serial_age_ms()
-        serial_alive = self._station.is_serial_link_alive(TELEMETRY_STALE_MS)
+        serial_alive = self._station.is_serial_link_alive(stale_ms)
 
         if self._serial_error and not self._station.reader_alive:
             link_state = "error"
@@ -1015,7 +1016,7 @@ class GroundStationWindow(QMainWindow):
                 link_state = "live"
                 age_ms = min(age_ms, serial_age_ms or age_ms)
             else:
-                link_state = "stale" if age_ms > TELEMETRY_STALE_MS else "live"
+                link_state = "stale" if age_ms > stale_ms else "live"
             sequence = snap.sequence
             uptime_ms = snap.uptime_ms
             source = snap.source
@@ -1054,6 +1055,22 @@ class GroundStationWindow(QMainWindow):
     def _periodic_serial_recovery(self) -> None:
         """Background poll — keeps trying to reopen serial after USB drop or stale link."""
         if not self._startup_complete or self._station.is_avionics_downloading():
+            return
+
+        # Debug USB: only reopen on hard serial failure. Bursty OS buffering can
+        # look like a stale link; reconnecting clears the RX buffer and worsens jitter.
+        if self._station.debug_mode:
+            if (
+                self._station.reader_alive
+                and self._station.serial_is_open
+                and not self._station.serial_fault
+            ):
+                self._stale_since = None
+                return
+            reason = "serial read error" if self._station.serial_fault else "serial reader stopped"
+            if not self._station.serial_is_open:
+                reason = "serial port closed"
+            self._attempt_serial_reconnect(reason)
             return
 
         state = self._station.telemetry.copy_state()

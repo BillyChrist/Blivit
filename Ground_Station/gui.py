@@ -7,7 +7,7 @@ Usage:
   python gui.py --debug      Force USB serial mode
   python gui.py --field      Force RFD900 radio mode
   python gui.py --log FILE   Log telemetry to CSV while GUI runs
-  activate venv: .venv\Scripts\Activate.ps1 
+  activate venv: .venv/Scripts/Activate.ps1
 """
 
 from __future__ import annotations
