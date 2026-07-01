@@ -7,8 +7,10 @@ Set DEBUG_MODE_OVERRIDE to True/False to force a mode without editing firmware.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 # Debug mode — avionics USB serial (same format as PlatformIO monitor @ 115200)
@@ -16,7 +18,7 @@ DEBUG_SERIAL_PORT = "COM6"  # ESP32 USB COM port on your PC
 DEBUG_BAUD = 115200
 
 # Field mode — ground-side RFD900 modem (matches avionics RFD900 @ 57600)
-RFD900_SERIAL_PORT = "COM7"
+RFD900_SERIAL_PORT = "COM4"
 RFD900_BAUD = 57600
 
 # Telemetry cadence — keep in sync with Avionics/Core/Inc/heartbeat.h
@@ -46,6 +48,8 @@ TELEMETRY_QUEUE_SIZE = 256
 
 _GROUND_STATION_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 RECEIVED_DATA_DIR = os.path.join(_GROUND_STATION_ROOT, "received_data")
+GROUND_STATION_SETTINGS_PATH = os.path.join(_GROUND_STATION_ROOT, "settings.json")
+DEFAULT_BAUD_RATES = [57600, 115200, 9600, 19200, 38400]
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 AVIONICS_MAIN_CPP = os.path.join(_REPO_ROOT, "Avionics", "Core", "Src", "main.cpp")
@@ -74,6 +78,36 @@ def read_debug_mode(path: Optional[str] = None) -> bool:
         )
 
     return match.group(1).lower() == "true"
+
+
+def default_serial_settings(debug_mode: bool) -> tuple[str, int]:
+    return (DEBUG_SERIAL_PORT, DEBUG_BAUD) if debug_mode else (RFD900_SERIAL_PORT, RFD900_BAUD)
+
+
+def load_gui_settings() -> dict[str, str | int]:
+    try:
+        with open(GROUND_STATION_SETTINGS_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    settings: dict[str, str | int] = {}
+    port = data.get("port")
+    baud = data.get("baud")
+    if isinstance(port, str):
+        settings["port"] = port
+    if isinstance(baud, int):
+        settings["baud"] = baud
+    return settings
+
+
+def save_gui_settings(port: str, baud: int) -> None:
+    Path(GROUND_STATION_SETTINGS_PATH).parent.mkdir(parents=True, exist_ok=True)
+    with open(GROUND_STATION_SETTINGS_PATH, "w", encoding="utf-8") as handle:
+        json.dump({"port": port, "baud": baud}, handle, indent=2)
 
 
 def resolve_debug_mode() -> bool:

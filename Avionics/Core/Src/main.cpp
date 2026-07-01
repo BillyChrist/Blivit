@@ -15,7 +15,7 @@
 #include <freertos/task.h>
 
 // ===== Runtime mode =====
-bool debug_mode = true;
+bool debug_mode = false;
 bool debug_message = false;
 bool debug_binary_telemetry = true;
 bool rfd900_hw_flow_control = true;

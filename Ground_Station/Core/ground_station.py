@@ -88,6 +88,10 @@ class GroundStation:
     def baud(self) -> int:
         return self._baud
 
+    def set_serial_settings(self, port: str, baud: int) -> None:
+        self._port = port
+        self._baud = baud
+
     @property
     def csv_log_path(self) -> Path | None:
         return self._csv_path
@@ -150,11 +154,24 @@ class GroundStation:
         age = self.serial_age_ms()
         return age is not None and age <= stale_ms
 
-    def init(self, *, quiet: bool = False) -> None:
+    def init(
+        self,
+        *,
+        quiet: bool = False,
+        port: str | None = None,
+        baud: int | None = None,
+    ) -> None:
         self._quiet = quiet
         mode = "debug (USB serial)" if self._debug_mode else "field (RFD900 radio)"
 
-        if self._debug_mode:
+        if port is not None or baud is not None:
+            if port is None or baud is None:
+                raise ValueError(
+                    "Both port and baud must be provided when overriding serial settings"
+                )
+            self._port = port
+            self._baud = baud
+        elif self._debug_mode:
             self._port = DEBUG_SERIAL_PORT
             self._baud = DEBUG_BAUD
         else:
@@ -252,7 +269,7 @@ class GroundStation:
                     break
                 if self._boot_logger is not None:
                     self._boot_logger(
-                        f"[GS] Port busy, retry {attempt}/{SERIAL_OPEN_RETRIES - 1}..."
+                        f"[GS] No response, retrying... ({attempt}/{SERIAL_OPEN_RETRIES - 1})"
                     )
                 time.sleep(SERIAL_OPEN_RETRY_DELAY_S)
         assert last_exc is not None

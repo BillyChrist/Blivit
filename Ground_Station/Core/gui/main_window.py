@@ -12,12 +12,15 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
@@ -30,13 +33,17 @@ from PyQt6.QtWidgets import (
 from gui.attitude_indicator import AttitudeDisplay
 from gui.flight_analytics import FlightAnalyticsTab
 from gui.log_bridge import UiLogBridge
+from serial.tools import list_ports
 from config import (
+    DEFAULT_BAUD_RATES,
     GUI_REFRESH_MS,
     SERIAL_RECONNECT_COOLDOWN_S,
     SERIAL_RECONNECT_POLL_MS,
     SERIAL_STALE_RECONNECT_MS,
     STATUS_LOG_INTERVAL_MS,
     TELEMETRY_STALE_MS,
+    load_gui_settings,
+    save_gui_settings,
 )
 from ground_station import GroundStation
 from telemetry import TelemetrySnapshot
@@ -154,6 +161,11 @@ class GroundStationWindow(QMainWindow):
         self._avionics_download_ui_active = False
         self._timestamp_record_active = False
         self._avionics_recording = False
+        self._gui_settings = load_gui_settings()
+        self._setup_port_combo: QComboBox | None = None
+        self._setup_baud_combo: QComboBox | None = None
+        self._setup_apply_btn: QPushButton | None = None
+        self._reconnect_btn: QPushButton | None = None
 
         self.setWindowTitle("Blivit Ground Station")
         self.resize(1100, 720)
@@ -270,7 +282,14 @@ class GroundStationWindow(QMainWindow):
         )
 
         try:
-            self._station.init(quiet=True)
+            if self._gui_settings.get("port") and self._gui_settings.get("baud"):
+                self._station.init(
+                    quiet=True,
+                    port=str(self._gui_settings["port"]),
+                    baud=int(self._gui_settings["baud"]),
+                )
+            else:
+                self._station.init(quiet=True)
         except Exception as exc:
             self._serial_error = str(exc)
             self._append_log(f"Serial open failed: {exc}")
@@ -318,6 +337,25 @@ class GroundStationWindow(QMainWindow):
         for label in (self._status_mode, self._status_link, self._status_port, self._status_seq):
             label.setFont(QFont("Consolas", 10))
             header.addWidget(label)
+
+        self._reconnect_btn = QPushButton("Reconnect")
+        self._reconnect_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._reconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reconnect_btn.setMinimumHeight(32)
+        self._reconnect_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2a3a4a;
+                color: #e0e0e0;
+                border: 1px solid #445566;
+                border-radius: 4px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background-color: #354a5a; }
+            """
+        )
+        self._reconnect_btn.clicked.connect(self._manual_reconnect)
+        header.addWidget(self._reconnect_btn)
         header.addStretch()
         live_layout.addLayout(header)
 
@@ -441,12 +479,157 @@ class GroundStationWindow(QMainWindow):
         live_layout.addWidget(main_split, stretch=1)
 
         self._analytics = FlightAnalyticsTab()
+        self._settings_tab = self._create_settings_tab()
         self._tabs.addTab(self._live_tab, "Live")
         self._tabs.addTab(self._analytics, "Flight Analytics")
+        self._tabs.addTab(self._settings_tab, "Setup")
         root.addWidget(self._tabs, stretch=1)
 
     def _append_log(self, message: str) -> None:
         self._log.appendPlainText(message)
+
+    def _create_settings_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        title = QLabel("Serial Setup")
+        title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        title.setStyleSheet("color: #e0e0e0;")
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(12)
+
+        self._setup_port_combo = QComboBox()
+        self._setup_port_combo.setEditable(True)
+        self._setup_port_combo.setMinimumWidth(220)
+        self._setup_baud_combo = QComboBox()
+        self._setup_baud_combo.setMinimumWidth(140)
+        self._setup_baud_combo.addItems([str(baud) for baud in DEFAULT_BAUD_RATES])
+
+        form.addRow("COM Port:", self._setup_port_combo)
+        form.addRow("Baud Rate:", self._setup_baud_combo)
+
+        layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._setup_apply_btn = QPushButton("Apply")
+        self._setup_apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._setup_apply_btn.setMinimumHeight(36)
+        self._setup_apply_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._setup_apply_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2a3a4a;
+                color: #e0e0e0;
+                border: 1px solid #445566;
+                border-radius: 4px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover { background-color: #354a5a; }
+            """
+        )
+        self._setup_apply_btn.clicked.connect(self._apply_serial_settings)
+        btn_row.addWidget(self._setup_apply_btn)
+        layout.addLayout(btn_row)
+
+        info = QLabel(
+            "Select the serial port and baud rate used by the avionics link. "
+            "Changes are saved to settings.json and applied on next reconnect."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaaaaa;")
+        layout.addWidget(info)
+
+        layout.addStretch()
+        self._refresh_serial_ports()
+        return tab
+
+    def _refresh_serial_ports(self) -> None:
+        if self._setup_port_combo is None or self._setup_baud_combo is None:
+            return
+
+        current_port = self._setup_port_combo.currentText()
+        self._setup_port_combo.clear()
+
+        ports = list_ports.comports()
+        for port in ports:
+            self._setup_port_combo.addItem(port.device)
+
+        if current_port:
+            index = self._setup_port_combo.findText(current_port)
+            if index >= 0:
+                self._setup_port_combo.setCurrentIndex(index)
+            else:
+                self._setup_port_combo.setEditText(current_port)
+
+        if not self._setup_port_combo.currentText():
+            default_port = self._gui_settings.get("port") or self._station.port or ""
+            if isinstance(default_port, str) and default_port:
+                index = self._setup_port_combo.findText(default_port)
+                if index >= 0:
+                    self._setup_port_combo.setCurrentIndex(index)
+                else:
+                    self._setup_port_combo.setEditText(default_port)
+
+        saved_baud = self._gui_settings.get("baud")
+        if saved_baud is not None:
+            index = self._setup_baud_combo.findText(str(saved_baud))
+            if index >= 0:
+                self._setup_baud_combo.setCurrentIndex(index)
+            else:
+                self._setup_baud_combo.addItem(str(saved_baud))
+                self._setup_baud_combo.setCurrentText(str(saved_baud))
+
+    def _apply_serial_settings(self) -> None:
+        if self._setup_port_combo is None or self._setup_baud_combo is None:
+            return
+
+        port = self._setup_port_combo.currentText().strip()
+        baud_text = self._setup_baud_combo.currentText().strip()
+        if not port or not baud_text:
+            self._append_log("Setup: port and baud must be supplied.")
+            return
+
+        try:
+            baud = int(baud_text)
+        except ValueError:
+            self._append_log(f"Setup: invalid baud rate '{baud_text}'.")
+            return
+
+        self._gui_settings["port"] = port
+        self._gui_settings["baud"] = baud
+        save_gui_settings(port, baud)
+        self._append_log(f"Saved serial settings: {port} @ {baud} baud.")
+
+        try:
+            self._station.set_serial_settings(port, baud)
+        except Exception as exc:
+            self._append_log(f"Setup: failed to apply settings locally: {exc}")
+            return
+
+        self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
+
+    def _manual_reconnect(self) -> None:
+        if not self._startup_complete:
+            self._append_log("Reconnect: serial not ready yet.")
+            return
+
+        self._append_log("Manual reconnect requested…")
+        try:
+            self._station.reconnect_serial()
+            self._serial_error = None
+            self._stale_since = None
+            self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
+            self._append_log("Serial port reopened — waiting for telemetry…")
+        except Exception as exc:
+            self._append_log(f"Manual reconnect failed: {exc}")
 
     def _toggle_csv_logging(self) -> None:
         if self._station.is_csv_logging():
