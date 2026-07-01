@@ -18,7 +18,7 @@ DEBUG_SERIAL_PORT = "COM5"  # ESP32 USB COM port on your PC
 DEBUG_BAUD = 115200
 
 # Field mode — ground-side RFD900 modem (matches avionics RFD900 @ 57600)
-RFD900_SERIAL_PORT = "COM6"
+RFD900_SERIAL_PORT = "COM4"
 RFD900_BAUD = 57600
 
 # Telemetry cadence — keep in sync with Avionics/Core/Inc/heartbeat.h

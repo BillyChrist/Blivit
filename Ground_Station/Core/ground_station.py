@@ -260,11 +260,10 @@ class GroundStation:
                     baud,
                     timeout=0.05,
                     dsrdtr=False,
-                    rtscts=False,
+                    rtscts=True,  # Enable hardware flow control for log downloads
                 )
                 # Avoid toggling DTR on open — can reset ESP32 mid-connect on first launch
                 ser.dtr = False
-                ser.rts = False
                 ser.reset_input_buffer()
                 ser.reset_output_buffer()
                 time.sleep(0.15)
