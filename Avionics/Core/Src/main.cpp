@@ -17,7 +17,7 @@
 // ===== Runtime mode =====
 bool debug_mode = false;
 bool debug_message = false;
-bool debug_binary_telemetry = true;
+bool debug_binary_telemetry = false;
 bool rfd900_hw_flow_control = true;
 
 // ===== ESP32 GPIO pinout (numbers below are ESP32 GPIO, not RFD900 pin names) =====
