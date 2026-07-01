@@ -203,6 +203,11 @@ class TelemetryStore:
         with self._lock:
             return self._latest
 
+    def read_latest(self) -> tuple[Optional[TelemetrySnapshot], int]:
+        """Latest sample and store seq under one lock (for GUI refresh)."""
+        with self._lock:
+            return self._latest, self._seq
+
     def copy_state(self) -> TelemetryState:
         with self._lock:
             return TelemetryState(

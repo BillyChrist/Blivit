@@ -945,39 +945,38 @@ class GroundStationWindow(QMainWindow):
             self._append_log(f"[GUI] refresh error: {exc}")
 
     def _refresh_inner(self) -> None:
-        state = self._station.telemetry.copy_state()
-        self._update_comms(state)
+        latest, seq = self._station.telemetry.read_latest()
+        self._update_comms(latest)
 
-        if state.latest is None:
+        if latest is None:
             return
 
         if not self._first_telemetry_logged:
             self._first_telemetry_logged = True
-            self._append_log(f"First telemetry received (seq {state.latest.sequence})")
+            self._append_log(f"First telemetry received (seq {latest.sequence})")
 
-        if state.seq == self._last_seq:
+        if seq == self._last_seq:
             return
 
-        self._last_seq = state.seq
-        snap = state.latest
-        self._update_status(snap)
-        self._update_gps(snap)
-        self._update_imu(snap)
+        self._last_seq = seq
+        self._update_status(latest)
+        self._update_gps(latest)
+        self._update_imu(latest)
 
-    def _link_state_from_telemetry(self, state) -> str:
+    def _link_state_from_telemetry(self, latest: Optional[TelemetrySnapshot]) -> str:
         stale_ms = self._station.telemetry_stale_ms
         if self._station.is_avionics_downloading() and self._station.is_serial_link_alive(
             stale_ms
         ):
             return "live"
-        if state.latest is None:
+        if latest is None:
             return "waiting"
-        age_ms = (time.monotonic() - state.latest.received_at) * 1000.0
+        age_ms = (time.monotonic() - latest.received_at) * 1000.0
         if age_ms > stale_ms:
             return "stale"
         return "live"
 
-    def _update_comms(self, state) -> None:
+    def _update_comms(self, latest: Optional[TelemetrySnapshot]) -> None:
         mode = "Debug (USB serial)" if self._station.debug_mode else "Field (RFD900)"
         port = self._station.port or "—"
         baud = self._station.baud or 0
@@ -996,12 +995,12 @@ class GroundStationWindow(QMainWindow):
         elif downloading and serial_alive:
             link_state = "live"
             error = None
-            snap = state.latest
+            snap = latest
             sequence = snap.sequence if snap is not None else None
             uptime_ms = snap.uptime_ms if snap is not None else None
             source = snap.source if snap is not None else "download"
             age_ms = serial_age_ms
-        elif state.latest is None:
+        elif latest is None:
             link_state = "waiting" if (serial_alive or not downloading) else "stale"
             error = None
             sequence = None
@@ -1010,7 +1009,7 @@ class GroundStationWindow(QMainWindow):
             source = None
         else:
             error = None
-            snap = state.latest
+            snap = latest
             age_ms = (time.monotonic() - snap.received_at) * 1000.0
             if downloading and serial_alive:
                 link_state = "live"
@@ -1040,7 +1039,7 @@ class GroundStationWindow(QMainWindow):
         elif link_state == "live" and downloading:
             self._status_link.setText("Link: live (downloading)")
             self._status_link.setStyleSheet("color: #44dd66;")
-        elif state.latest is None and not serial_alive:
+        elif latest is None and not serial_alive:
             self._status_link.setText("Link: waiting…")
             self._status_link.setStyleSheet("color: #ffaa00;")
         elif link_state == "stale":
@@ -1073,8 +1072,8 @@ class GroundStationWindow(QMainWindow):
             self._attempt_serial_reconnect(reason)
             return
 
-        state = self._station.telemetry.copy_state()
-        link_state = self._link_state_from_telemetry(state)
+        latest, _seq = self._station.telemetry.read_latest()
+        link_state = self._link_state_from_telemetry(latest)
 
         if (
             link_state == "live"
@@ -1098,13 +1097,13 @@ class GroundStationWindow(QMainWindow):
                 self._stale_since = time.monotonic()
             elif (time.monotonic() - self._stale_since) * 1000.0 < SERIAL_STALE_RECONNECT_MS:
                 return
-        elif link_state == "waiting" and state.latest is not None:
+        elif link_state == "waiting" and latest is not None:
             # Had telemetry before, now waiting — treat like stale
             if self._stale_since is None:
                 self._stale_since = time.monotonic()
             elif (time.monotonic() - self._stale_since) * 1000.0 < SERIAL_STALE_RECONNECT_MS:
                 return
-        elif link_state == "waiting" and state.latest is None:
+        elif link_state == "waiting" and latest is None:
             # Never connected — still retry open periodically
             pass
 
