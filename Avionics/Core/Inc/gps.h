@@ -47,6 +47,7 @@ bool GPS_Init(void);
 void GPS_Update(void);
 bool GPS_IsReady(void);
 uint32_t GPS_GetUpdateCount(void);
+void GPS_CopyData(GPS_Data_t *out);
 const GPS_Data_t *GPS_GetData(void);
 
 #endif // GPS_H

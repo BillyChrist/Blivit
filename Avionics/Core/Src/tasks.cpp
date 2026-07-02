@@ -18,15 +18,20 @@
 
 #define SENSOR_TASK_CORE 1
 #define COMMS_TASK_CORE 0
+#define GPS_TASK_CORE 1
 #define SENSOR_TASK_STACK 6144U
 #define COMMS_TASK_STACK 6144U
+#define GPS_TASK_STACK 4096U
+#define LOG_TASK_STACK 4096U
 #define SENSOR_TASK_PRIORITY 2U
 #define COMMS_TASK_PRIORITY 2U
-#define LOG_TASK_STACK 4096U
+#define GPS_TASK_PRIORITY 1U
 #define LOG_TASK_PRIORITY 1U
 #define SENSOR_LOOP_DELAY_MS 5U
+#define GPS_LOOP_DELAY_MS 50U
 
 static void SensorTask(void *param);
+static void GPSTask(void *param);
 static void CommsTask(void *param);
 static void LogTask(void *param);
 
@@ -40,6 +45,15 @@ void Tasks_Start(void)
         SENSOR_TASK_PRIORITY,
         nullptr,
         SENSOR_TASK_CORE);
+
+    xTaskCreatePinnedToCore(
+        GPSTask,
+        "blivit-gps",
+        GPS_TASK_STACK,
+        nullptr,
+        GPS_TASK_PRIORITY,
+        nullptr,
+        GPS_TASK_CORE);
 
     xTaskCreatePinnedToCore(
         CommsTask,
@@ -64,10 +78,9 @@ static void SensorTask(void *param)
 {
     (void)param;
 
-    GPS_Init();
     IMU_Init();
 
-    SerialDebug_Print("[TASK] sensor core=%d — GPS I2C + IMU UART (%u ms heartbeat snapshot)",
+    SerialDebug_Print("[TASK] sensor core=%d — IMU UART (%u ms telemetry publish)",
                       SENSOR_TASK_CORE,
                       static_cast<unsigned>(TELEMETRY_OUTPUT_INTERVAL_MS));
 
@@ -76,7 +89,6 @@ static void SensorTask(void *param)
 
     for (;;)
     {
-        GPS_Update();
         IMU_Update();
 
         const uint32_t now = millis();
@@ -113,6 +125,21 @@ static void SensorTask(void *param)
         }
 
         vTaskDelay(pdMS_TO_TICKS(SENSOR_LOOP_DELAY_MS));
+    }
+}
+
+static void GPSTask(void *param)
+{
+    (void)param;
+
+    GPS_Init();
+
+    SerialDebug_Print("[TASK] gps core=%d — SAM-M8Q I2C", GPS_TASK_CORE);
+
+    for (;;)
+    {
+        GPS_Update();
+        vTaskDelay(pdMS_TO_TICKS(GPS_LOOP_DELAY_MS));
     }
 }
 

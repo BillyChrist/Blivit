@@ -153,8 +153,7 @@ class GroundStationWindow(QMainWindow):
         self._serial_error: Optional[str] = None
         self._startup_complete = False
         self._first_telemetry_logged = False
-        self._startup_attempts = 0
-        self._max_startup_attempts = 3
+        self._serial_connect_running = False
         self._stale_since: float | None = None
         self._last_reconnect_attempt = 0.0
         self._avionics_download_ui_active = False
@@ -237,6 +236,10 @@ class GroundStationWindow(QMainWindow):
             self._on_avionics_download_failed,
             Qt.ConnectionType.QueuedConnection,
         )
+        self._log_bridge.serial_connect_done.connect(
+            self._on_serial_connect_done,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._station.set_boot_logger(self._log_bridge.write)
         self._station.set_avionics_log_event_handler(self._log_bridge.emit_avionics_event)
 
@@ -270,52 +273,98 @@ class GroundStationWindow(QMainWindow):
         if self._startup_complete:
             return
 
-        self._startup_attempts += 1
+        self._startup_complete = True
         mode = "Debug (USB)" if self._station.debug_mode else "Field (RFD900)"
         self._status_mode.setText(f"Mode: {mode}")
+        self._status_port.setText("Port: connecting…")
+        self._status_link.setText("Link: waiting…")
+        self._append_log(f"Mode: {mode}")
+        self._append_log("Opening serial port in background — UI stays responsive.")
 
-        if self._startup_attempts == 1:
-            self._append_log(f"Mode: {mode}")
-        self._append_log(
-            f"Opening serial port… (attempt {self._startup_attempts}/{self._max_startup_attempts})"
-        )
-
-        try:
-            if self._gui_settings.get("port") and self._gui_settings.get("baud"):
-                self._station.init(
-                    quiet=True,
-                    port=str(self._gui_settings["port"]),
-                    baud=int(self._gui_settings["baud"]),
-                )
-            else:
-                self._station.init(quiet=True)
-        except Exception as exc:
-            self._serial_error = str(exc)
-            self._append_log(f"Serial open failed: {exc}")
-            if self._startup_attempts < self._max_startup_attempts:
-                delay_ms = 1000 * self._startup_attempts
-                self._append_log(f"Retrying in {delay_ms // 1000}s…")
-                QTimer.singleShot(delay_ms, self._begin_startup)
-                return
-            self._append_log("Could not open serial port — will keep retrying in the background.")
-        else:
-            self._serial_error = None
-            self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
-            if self._log_path:
-                try:
-                    path = self._station.start_csv_logging(self._log_path)
-                    self._append_log(f"Ground station CSV logging started: {path.name}")
-                    self._sync_logging_ui()
-                except OSError as exc:
-                    self._append_log(f"Logging failed: {exc}")
-            self._append_log("Port open — waiting for first telemetry…")
-            QTimer.singleShot(500, self._query_avionics_storage)
-
-        self._startup_complete = True
         self._timer.start(GUI_REFRESH_MS)
         self._status_timer.start(STATUS_LOG_INTERVAL_MS)
         self._reconnect_timer.start(SERIAL_RECONNECT_POLL_MS)
+        self._start_async_serial_connect(reason="startup")
         self._refresh()
+
+    def _resolve_serial_settings(self) -> tuple[str, int] | None:
+        port = self._gui_settings.get("port")
+        baud = self._gui_settings.get("baud")
+        if port and baud:
+            return str(port), int(baud)
+        return None
+
+    def _start_async_serial_connect(
+        self,
+        *,
+        reconnect: bool = False,
+        reason: str = "startup",
+    ) -> None:
+        if self._serial_connect_running:
+            return
+
+        self._serial_connect_running = True
+        self._status_port.setText("Port: connecting…")
+        if reason != "startup":
+            self._append_log(f"Opening serial port ({reason})…")
+
+        settings = self._resolve_serial_settings()
+        station = self._station
+        bridge = self._log_bridge
+
+        def work() -> None:
+            error = ""
+            ok = False
+            try:
+                if reconnect and (station.serial_is_open or station.reader_alive):
+                    station.reconnect_serial()
+                elif settings is not None:
+                    port, baud = settings
+                    station.init(quiet=True, port=port, baud=baud)
+                else:
+                    station.init(quiet=True)
+                ok = True
+            except Exception as exc:
+                error = str(exc)
+            bridge.emit_serial_connect_done(ok, error, reason)
+
+        threading.Thread(
+            target=work,
+            name="blivit-serial-connect",
+            daemon=True,
+        ).start()
+
+    def _on_serial_connect_done(self, ok: bool, error: str, reason: str) -> None:
+        self._serial_connect_running = False
+        if ok:
+            self._serial_error = None
+            self._stale_since = None
+            self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
+            if reason == "startup":
+                if self._log_path:
+                    try:
+                        path = self._station.start_csv_logging(self._log_path)
+                        self._append_log(f"Ground station CSV logging started: {path.name}")
+                        self._sync_logging_ui()
+                    except OSError as exc:
+                        self._append_log(f"Logging failed: {exc}")
+                self._append_log("Port open — waiting for first telemetry…")
+                QTimer.singleShot(500, self._query_avionics_storage)
+            else:
+                self._append_log("Serial port reopened — waiting for telemetry…")
+            return
+
+        self._serial_error = error
+        self._status_port.setText("Port: not connected")
+        self._status_link.setText("Link: waiting…")
+        self._status_link.setStyleSheet("color: #ffaa00;")
+        self._append_log(f"Serial open failed: {error}")
+        if reason == "startup":
+            self._append_log(
+                "Use the Setup tab to choose the correct COM port, then click Reconnect."
+            )
+        else:
+            self._stale_since = time.monotonic()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -619,16 +668,12 @@ class GroundStationWindow(QMainWindow):
         if not self._startup_complete:
             self._append_log("Reconnect: serial not ready yet.")
             return
+        if self._serial_connect_running:
+            self._append_log("Reconnect: connection already in progress.")
+            return
 
         self._append_log("Manual reconnect requested…")
-        try:
-            self._station.reconnect_serial()
-            self._serial_error = None
-            self._stale_since = None
-            self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
-            self._append_log("Serial port reopened — waiting for telemetry…")
-        except Exception as exc:
-            self._append_log(f"Manual reconnect failed: {exc}")
+        self._start_async_serial_connect(reconnect=True, reason="manual")
 
     def _toggle_csv_logging(self) -> None:
         if self._station.is_csv_logging():
@@ -1123,18 +1168,11 @@ class GroundStationWindow(QMainWindow):
         now = time.monotonic()
         if (now - self._last_reconnect_attempt) < SERIAL_RECONNECT_COOLDOWN_S:
             return
+        if self._serial_connect_running:
+            return
 
         self._last_reconnect_attempt = now
-        self._append_log(f"Reopening serial port ({reason})…")
-        try:
-            self._station.reconnect_serial()
-            self._serial_error = None
-            self._stale_since = None
-            self._status_port.setText(f"Port: {self._station.port} @ {self._station.baud}")
-            self._append_log("Serial port reopened — waiting for telemetry…")
-        except Exception as exc:
-            self._append_log(f"Serial reconnect failed: {exc}")
-            self._stale_since = time.monotonic()
+        self._start_async_serial_connect(reconnect=True, reason=reason)
 
     def _log_periodic_status(self) -> None:
         if not self._startup_complete:

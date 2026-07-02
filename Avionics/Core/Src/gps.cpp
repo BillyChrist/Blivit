@@ -27,11 +27,15 @@
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 #include <Wire.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
 
 static SFE_UBLOX_GNSS gnss;
+static SemaphoreHandle_t gps_data_mutex = nullptr;
 
 typedef struct
 {
@@ -64,6 +68,22 @@ static uint32_t last_pvt_itow_ms = UINT32_MAX;
 #define GPS_RETRY_INTERVAL_MS 5000U
 #define GPS_I2C_STALE_MS 15000U
 
+static void GPS_Lock(void)
+{
+    if (gps_data_mutex != nullptr)
+    {
+        xSemaphoreTake(gps_data_mutex, portMAX_DELAY);
+    }
+}
+
+static void GPS_Unlock(void)
+{
+    if (gps_data_mutex != nullptr)
+    {
+        xSemaphoreGive(gps_data_mutex);
+    }
+}
+
 static bool GPS_ConfigureModule(void);
 static bool GPS_TryConnect(void);
 static void GPS_MarkDisconnected(const char *reason);
@@ -75,9 +95,16 @@ GPS_Data_t gpsData{};
 
 bool GPS_Init(void)
 {
+    if (gps_data_mutex == nullptr)
+    {
+        gps_data_mutex = xSemaphoreCreateMutex();
+    }
+
+    GPS_Lock();
     gpsData = {};
     strncpy(gpsData.status, "NOFIX", sizeof(gpsData.status));
     strncpy(gpsData.mode, "NONE", sizeof(gpsData.mode));
+    GPS_Unlock();
 
     last_gps_retry_ms = millis();
     gps_connected = GPS_TryConnect();
@@ -146,8 +173,7 @@ void GPS_Update(void)
     GPS_ApplyReading(&reading);
     GPS_FormatStatusStrings(&reading);
     gps_update_count++;
-
-    // Periodic GPS diagnostic if debug_message enabled
+    // Periodic GPS diagnostic if debug_message enabled (after gpsData is updated)
     if (debug_message)
     {
         static uint32_t last_gps_debug_ms = 0;
@@ -183,6 +209,18 @@ uint32_t GPS_GetUpdateCount(void)
 bool GPS_IsReady(void)
 {
     return gps_connected;
+}
+
+void GPS_CopyData(GPS_Data_t *out)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    GPS_Lock();
+    *out = gpsData;
+    GPS_Unlock();
 }
 
 const GPS_Data_t *GPS_GetData(void)
@@ -288,6 +326,8 @@ static void GPS_ApplyReading(const GPS_Reading_t *reading)
         return;
     }
 
+    GPS_Lock();
+
     if (reading->fix_valid)
     {
         gpsData.position.latitude = reading->latitude;
@@ -327,6 +367,8 @@ static void GPS_ApplyReading(const GPS_Reading_t *reading)
         gpsData.utc_time[0] = '\0';
         gpsData.date[0] = '\0';
     }
+
+    GPS_Unlock();
 }
 
 static void GPS_FormatStatusStrings(const GPS_Reading_t *reading)
@@ -335,6 +377,8 @@ static void GPS_FormatStatusStrings(const GPS_Reading_t *reading)
     {
         return;
     }
+
+    GPS_Lock();
 
     if (reading->fix_valid)
     {
@@ -370,4 +414,6 @@ static void GPS_FormatStatusStrings(const GPS_Reading_t *reading)
         break;
     }
     gpsData.mode[sizeof(gpsData.mode) - 1] = '\0';
+
+    GPS_Unlock();
 }

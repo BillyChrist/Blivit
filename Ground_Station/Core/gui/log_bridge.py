@@ -12,6 +12,10 @@ class UiLogBridge(QObject):
     avionics_event = pyqtSignal(str)
     avionics_download_done = pyqtSignal(str)
     avionics_download_failed = pyqtSignal(str)
+    serial_connect_done = pyqtSignal(bool, str, str)
+
+    def emit_serial_connect_done(self, ok: bool, error: str, reason: str) -> None:
+        self.serial_connect_done.emit(ok, error, reason)
 
     def write(self, text: str) -> None:
         self.message.emit(text)

@@ -11,7 +11,6 @@
 #include <cstdio>
 
 #define DEBUG_OUTPUT_INTERVAL_MS DEBUG_TELEMETRY_INTERVAL_MS
-#define HEARTBEAT_OUTPUT_INTERVAL_MS 5000U
 #define HEARTBEAT_GRAVITY_MS2 9.80665f
 #define DEBUG_BINARY_HEX_MAX ((HEARTBEAT_PACKET_SIZE * 2U) + 1U)
 
@@ -78,79 +77,17 @@ void Heartbeat_UpdateFromSample(const TelemetrySample_t *sample)
 void telemetry_output(void)
 {
     debug_output();
-    if (!(debug_mode && debug_binary_telemetry))
-    {
-        heartbeat_output();
-    }
-}
-
-void heartbeat_output(void)
-{
-    static uint32_t lastPrintMs = 0;
-    uint8_t buffer[HEARTBEAT_PACKET_SIZE];
-    size_t packetLen = 0;
-
-    if (!heartbeatSampleValid || !Heartbeat_ShouldPrint(HEARTBEAT_OUTPUT_INTERVAL_MS, &lastPrintMs))
-    {
-        return;
-    }
-
-    if (!Heartbeat_BuildPacket(buffer, sizeof(buffer), &packetLen))
-    {
-        SerialDebug_Print("[HB] ERROR: failed to build packet");
-        return;
-    }
-
-    uint16_t storedCrc = heartbeatPacket.crc;
-    heartbeatPacket.crc = 0;
-    uint16_t recalcCrc = Heartbeat_CalculateCRC(
-        reinterpret_cast<const uint8_t *>(&heartbeatPacket),
-        HEARTBEAT_PACKET_SIZE - sizeof(heartbeatPacket.crc));
-    heartbeatPacket.crc = storedCrc;
-
-    SerialDebug_Print(
-        "[HB] seq=%u uptime=%lums size=%u crc=0x%04X valid=%s fix=%u sats=%u lat=%.6f lon=%.6f alt=%.1f "
-        "spd=%.2f crs=%.1f vn=%.2f ve=%.2f vd=%.2f climb=%.2f",
-        heartbeatPacket.sequence,
-        heartbeatPacket.uptime_ms,
-        static_cast<unsigned>(packetLen),
-        heartbeatPacket.crc,
-        recalcCrc == storedCrc ? "yes" : "no",
-        heartbeatPacket.gps_fix,
-        heartbeatPacket.gps_satellites,
-        heartbeatPacket.latitude,
-        heartbeatPacket.longitude,
-        heartbeatPacket.altitude,
-        heartbeatPacket.speed,
-        heartbeatPacket.course,
-        heartbeatSample.vel_n,
-        heartbeatSample.vel_e,
-        heartbeatSample.vel_d,
-        -heartbeatSample.vel_d);
-
-    SerialDebug_Print(
-        "[HB] imu r=%.2f p=%.2f y=%.2f temp=%.2f "
-        "accel_g=(%.3f,%.3f,%.3f) gyro=(%.2f,%.2f,%.2f) mag=(%.1f,%.1f,%.1f)",
-        heartbeatPacket.roll,
-        heartbeatPacket.pitch,
-        heartbeatPacket.yaw,
-        heartbeatPacket.temperature,
-        Heartbeat_AccelToG(heartbeatPacket.accel_x),
-        Heartbeat_AccelToG(heartbeatPacket.accel_y),
-        Heartbeat_AccelToG(heartbeatPacket.accel_z),
-        heartbeatPacket.gyro_x,
-        heartbeatPacket.gyro_y,
-        heartbeatPacket.gyro_z,
-        heartbeatPacket.mag_x,
-        heartbeatPacket.mag_y,
-        heartbeatPacket.mag_z);
 }
 
 void debug_output(void)
 {
     static uint32_t lastPrintMs = 0;
 
-    if (!heartbeatSampleValid || !Heartbeat_ShouldPrint(DEBUG_OUTPUT_INTERVAL_MS, &lastPrintMs))
+    const uint32_t interval_ms = (debug_mode && debug_binary_telemetry)
+                                     ? DEBUG_TELEMETRY_INTERVAL_MS
+                                     : DEBUG_TEXT_TELEMETRY_INTERVAL_MS;
+
+    if (!heartbeatSampleValid || !Heartbeat_ShouldPrint(interval_ms, &lastPrintMs))
     {
         return;
     }

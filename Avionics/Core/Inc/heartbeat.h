@@ -26,9 +26,11 @@
 // RFD uses a slower interval; high-rate data stays on onboard flash.
 #define RFD900_TELEMETRY_INTERVAL_MS 100U
 
-// Debug mode (USB @ 115200): same cadence as field when using one line or binary TELEMETRY.
-// Two-line text @ 33 Hz exceeds 115200 (~11.5 KB/s); use DEBUG_TELEMETRY_BINARY or one line.
+// Debug mode (USB @ 115200):
+//   debug_binary_telemetry=false → human-readable [DEBUG] lines (default bench path)
+//   debug_binary_telemetry=true  → TELEMETRY,<seq>,<hex>,<crc> (same wire format as RFD)
 #define DEBUG_TELEMETRY_INTERVAL_MS TELEMETRY_OUTPUT_INTERVAL_MS
+#define DEBUG_TEXT_TELEMETRY_INTERVAL_MS 100U
 
 // During onboard log download, heartbeat continues at a slower rate so the ground
 // station link indicator stays live while LOG,DATA chunks share the serial port.
@@ -71,6 +73,5 @@ bool Heartbeat_HasSample(void);
 bool Heartbeat_BuildPacket(uint8_t *buffer, size_t bufferLen, size_t *packetLen);
 void telemetry_output(void);
 void debug_output(void);
-void heartbeat_output(void);
 
 #endif // HEARTBEAT_H

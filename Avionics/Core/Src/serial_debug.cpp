@@ -4,11 +4,20 @@
 #include <cstdarg>
 #include <cstdio>
 
-static char serial_debug_buffer[512];
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+static SemaphoreHandle_t serial_debug_mutex = nullptr;
 
 void SerialDebug_Init(void)
 {
     Serial.begin(115200);
+
+    if (serial_debug_mutex == nullptr)
+    {
+        serial_debug_mutex = xSemaphoreCreateMutex();
+    }
+
     while (!Serial && (millis() < 3000))
     {
         /* wait up to 3 s for USB serial on boot */
@@ -27,10 +36,22 @@ void SerialDebug_Print(const char *fmt, ...)
         return;
     }
 
+    char local_buffer[512];
+
     va_list args;
     va_start(args, fmt);
-    vsnprintf(serial_debug_buffer, sizeof(serial_debug_buffer), fmt, args);
+    vsnprintf(local_buffer, sizeof(local_buffer), fmt, args);
     va_end(args);
 
-    Serial.println(serial_debug_buffer);
+    if (serial_debug_mutex != nullptr)
+    {
+        xSemaphoreTake(serial_debug_mutex, portMAX_DELAY);
+    }
+
+    Serial.println(local_buffer);
+
+    if (serial_debug_mutex != nullptr)
+    {
+        xSemaphoreGive(serial_debug_mutex);
+    }
 }

@@ -13,7 +13,6 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-
 // ===== Runtime mode =====
 bool debug_mode = false;
 bool debug_message = false;
@@ -56,7 +55,14 @@ void setup()
 
     if (debug_mode)
     {
-        SerialDebug_Print("[MODE] debug — combined text telemetry on USB @ 115200");
+        if (debug_binary_telemetry)
+        {
+            SerialDebug_Print("[MODE] debug — TELEMETRY binary on USB @ 115200");
+        }
+        else
+        {
+            SerialDebug_Print("[MODE] debug — [DEBUG] text telemetry on USB @ 115200");
+        }
     }
     else
     {

@@ -13,8 +13,12 @@ bool TelemetrySample_BuildFromSensors(TelemetrySample_t *out)
         return false;
     }
 
-    const GPS_Data_t *gps = GPS_GetData();
+    GPS_Data_t gps{};
     const bool gps_ready = GPS_IsReady();
+    if (gps_ready)
+    {
+        GPS_CopyData(&gps);
+    }
 
     IMU_Data_t imu{};
     const bool imu_ready = IMU_GetTelemetrySnapshot(&imu);
@@ -29,24 +33,24 @@ bool TelemetrySample_BuildFromSensors(TelemetrySample_t *out)
     out->sample_time_ms = SerialDebug_Millis();
     out->uptime_ms = out->sample_time_ms;
 
-    out->gps_valid = gps->fix.valid ? 1U : 0U;
-    out->gps_satellites = static_cast<uint8_t>(gps->fix.satellites);
-    out->hdop = gps->fix.hdop;
+    out->gps_valid = gps.fix.valid ? 1U : 0U;
+    out->gps_satellites = static_cast<uint8_t>(gps.fix.satellites);
+    out->hdop = gps.fix.hdop;
 
-    if (gps->fix.valid)
+    if (gps.fix.valid)
     {
-        out->latitude = gps->position.latitude;
-        out->longitude = gps->position.longitude;
-        out->altitude = gps->position.altitude;
-        out->speed = gps->position.speed;
-        out->course = gps->position.course;
-        out->vel_n = gps->position.vel_n;
-        out->vel_e = gps->position.vel_e;
-        out->vel_d = gps->position.vel_d;
+        out->latitude = gps.position.latitude;
+        out->longitude = gps.position.longitude;
+        out->altitude = gps.position.altitude;
+        out->speed = gps.position.speed;
+        out->course = gps.position.course;
+        out->vel_n = gps.position.vel_n;
+        out->vel_e = gps.position.vel_e;
+        out->vel_d = gps.position.vel_d;
     }
 
-    std::strncpy(out->utc_time, gps->utc_time, sizeof(out->utc_time) - 1U);
-    std::strncpy(out->date, gps->date, sizeof(out->date) - 1U);
+    std::strncpy(out->utc_time, gps.utc_time, sizeof(out->utc_time) - 1U);
+    std::strncpy(out->date, gps.date, sizeof(out->date) - 1U);
 
     if (imu_ready)
     {
